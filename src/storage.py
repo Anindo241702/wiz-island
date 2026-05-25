@@ -287,6 +287,28 @@ def windows_create_vhdx(size_gb):
             pass
 
 
+def _windows_grant_vscode_permissions():
+    """Grant the guest user permissions needed for VS Code Remote-SSH.
+
+    VS Code's install script runs Get-CimInstance win32_process to detect
+    the platform. Standard users lack WMI access, causing the installation
+    to fail. Adding the user to these groups resolves the issue.
+    """
+    groups = [
+        "Performance Monitor Users",
+        "Distributed COM Users",
+    ]
+    for group in groups:
+        try:
+            run_command(
+                f'net localgroup "{group}" {WINDOWS_GUEST_USER} /add',
+                description=f"add {WINDOWS_GUEST_USER} to {group}",
+                check=False,
+            )
+        except Exception as exc:
+            logger.warning("Could not add to %s: %s", group, exc)
+
+
 def windows_create_guest_user():
     """Create a standard local user 'WizGuest' on Windows with home on X:\\."""
     password = _get_or_create_password()
@@ -315,6 +337,7 @@ def windows_create_guest_user():
                 )
             except Exception as exc:
                 logger.warning("Could not set home directory: %s", exc)
+            _windows_grant_vscode_permissions()
             return
     except Exception as exc:
         logger.warning("Could not check user existence: %s", exc)
@@ -330,6 +353,8 @@ def windows_create_guest_user():
     except Exception as exc:
         logger.error("Failed to create user '%s': %s", WINDOWS_GUEST_USER, exc)
         raise
+
+    _windows_grant_vscode_permissions()
 
 
 def windows_set_permissions():

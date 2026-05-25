@@ -6,6 +6,7 @@ SSH config file, and providing connection instructions for VS Code
 Remote-SSH.
 """
 
+import json
 import logging
 import os
 import platform
@@ -178,6 +179,60 @@ def remove_ssh_config(alias="WizIsland"):
         print(f"  [ERROR] Could not remove entry: {exc}")
 
 
+def _get_vscode_settings_path():
+    """Return the VS Code user settings.json path."""
+    plat = platform.system()
+    if plat == "Windows":
+        base = os.environ.get("APPDATA", "")
+        return os.path.join(base, "Code", "User", "settings.json")
+    elif plat == "Darwin":
+        return os.path.expanduser(
+            "~/Library/Application Support/Code/User/settings.json"
+        )
+    else:
+        return os.path.expanduser("~/.config/Code/User/settings.json")
+
+
+def configure_vscode_remote_platform(alias="WizIsland", host_platform="windows"):
+    """Set remote.SSH.remotePlatform in VS Code settings.
+
+    This tells VS Code the host OS so it skips auto-detection (which
+    fails when the guest user lacks WMI permissions on Windows).
+    """
+    settings_path = _get_vscode_settings_path()
+    settings = {}
+
+    if os.path.exists(settings_path):
+        try:
+            with open(settings_path, "r") as f:
+                content = f.read().strip()
+                if content:
+                    settings = json.loads(content)
+        except (json.JSONDecodeError, IOError) as exc:
+            logger.warning("Could not read VS Code settings: %s", exc)
+            settings = {}
+
+    remote_platform = settings.get("remote.SSH.remotePlatform", {})
+    if not isinstance(remote_platform, dict):
+        remote_platform = {}
+
+    remote_platform[alias] = host_platform
+    settings["remote.SSH.remotePlatform"] = remote_platform
+
+    try:
+        os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+        with open(settings_path, "w") as f:
+            json.dump(settings, f, indent=4)
+        logger.info(
+            "Set remote.SSH.remotePlatform.%s = %s in VS Code settings.",
+            alias, host_platform,
+        )
+        return True
+    except (IOError, OSError) as exc:
+        logger.warning("Could not update VS Code settings: %s", exc)
+        return False
+
+
 def print_connection_instructions(host, port, config_path, username="wizguest",
                                   alias="WizIsland", reachable=None, password=None):
     """Print detailed connection instructions for the user."""
@@ -311,11 +366,22 @@ def run_user_mode():
         print("  Connection test: Host not reachable (it may not be ready yet)")
         print("  The SSH config will be saved anyway — you can try connecting later.")
 
-    # Guest username - auto-detect based on Host's platform
-    default_username = "WizGuest" if platform.system() == "Windows" else "wizguest"
-    print(f"\n  The default guest username depends on the Host's OS:")
-    print(f"    - Windows Host: WizGuest")
-    print(f"    - Linux Host:   wizguest")
+    # Host platform
+    print("\n  What OS is the Host running?")
+    print("    [1] Windows (default)")
+    print("    [2] Linux")
+    try:
+        os_choice = input("  Select [1-2]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        os_choice = "1"
+    if os_choice == "2":
+        host_platform = "linux"
+        default_username = "wizguest"
+    else:
+        host_platform = "windows"
+        default_username = "WizGuest"
+
+    # Guest username
     try:
         user_choice = input(
             f"\n  Guest username [{default_username}]: "
@@ -346,6 +412,14 @@ def run_user_mode():
         print(f"  [ERROR] Failed to update SSH config: {exc}")
         input("  Press Enter to return to the menu...")
         return
+
+    # Configure VS Code remotePlatform
+    print("  Configuring VS Code Remote-SSH platform...")
+    if configure_vscode_remote_platform("WizIsland", host_platform):
+        print(f"  VS Code platform set to: {host_platform}")
+    else:
+        print(f"  Could not auto-configure VS Code. Set manually:")
+        print(f'    "remote.SSH.remotePlatform": {{"WizIsland": "{host_platform}"}}')
 
     print_connection_instructions(
         host, port, config_path, username=username,
