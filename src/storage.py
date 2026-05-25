@@ -447,6 +447,39 @@ def _windows_scan_tool_paths():
     return found
 
 
+def _windows_grant_tool_access():
+    """Grant the guest user read+execute access to discovered tool dirs.
+
+    Per-user Python installs (AppData\\Local\\Python) are not accessible
+    to other users by default. This grants read+execute so the guest can
+    run tools without being able to modify them.
+    """
+    tool_paths = _windows_scan_tool_paths()
+    if not tool_paths:
+        logger.info("No tool directories found to grant access to.")
+        return
+
+    granted = []
+    for tool_dir in tool_paths:
+        # Only grant access to per-user directories (C:\Users\...)
+        # System-wide dirs (C:\Program Files, etc.) are already accessible
+        if not tool_dir.lower().startswith(r"c:\users"):
+            continue
+        try:
+            run_command(
+                f'icacls "{tool_dir}" /grant {WINDOWS_GUEST_USER}:(OI)(CI)RX /T /C /Q',
+                description=f"grant read+execute on {tool_dir}",
+                check=False,
+            )
+            granted.append(tool_dir)
+            print(f"    + Granted access: {tool_dir}")
+        except Exception as exc:
+            logger.warning("Could not grant access to %s: %s", tool_dir, exc)
+
+    if granted:
+        logger.info("Granted guest read+execute access to %d tool dirs.", len(granted))
+
+
 def windows_create_guest_user():
     """Create a standard local user 'WizGuest' on Windows with home on X:\\."""
     password = _get_or_create_password()
@@ -754,81 +787,78 @@ def _windows_set_default_shell():
     profile_block = f"""
 # --- Wiz Island Guest Environment ---
 if ($env:USERNAME -eq '{WINDOWS_GUEST_USER}') {{
+    $ErrorActionPreference = 'SilentlyContinue'
+
     # Dynamically discover dev tools and add to PATH
     $toolDirs = @(
-        # Git
         'C:\\Program Files\\Git\\cmd',
         'C:\\Program Files\\Git\\bin',
         'C:\\Program Files\\Git\\usr\\bin',
-        # Node.js
         'C:\\Program Files\\nodejs',
-        # Go
         'C:\\Program Files\\Go\\bin',
-        # Java
         'C:\\Program Files\\Java\\jdk-21\\bin',
         'C:\\Program Files\\Java\\jdk-17\\bin',
-        # VS Code
         'C:\\Program Files\\Microsoft VS Code\\bin'
     )
 
-    # Scan all user profiles for Python, Conda, npm, Rust, CUDA
-    Get-ChildItem 'C:\\Users' -Directory -ErrorAction SilentlyContinue | ForEach-Object {{
+    # System-wide Python installs
+    foreach ($pyRoot in @('C:\\Python314','C:\\Python313','C:\\Python312','C:\\Python311','C:\\Python310','C:\\Python39')) {{
+        if (Test-Path $pyRoot -EA 0) {{ $toolDirs += $pyRoot; $toolDirs += "$pyRoot\\Scripts" }}
+    }}
+
+    # Per-user tool installs
+    Get-ChildItem 'C:\\Users' -Directory -EA 0 | ForEach-Object {{
         $u = $_.FullName
-        # Python (multiple install locations)
         foreach ($pyBase in @(
             (Join-Path $u 'AppData\\Local\\Python'),
+            (Join-Path $u 'AppData\\Local\\Python\\bin'),
             (Join-Path $u 'AppData\\Local\\Programs\\Python')
         )) {{
-            if (Test-Path $pyBase) {{
+            if (Test-Path $pyBase -EA 0) {{
                 $toolDirs += $pyBase
-                if (Test-Path (Join-Path $pyBase 'bin')) {{ $toolDirs += Join-Path $pyBase 'bin' }}
-                if (Test-Path (Join-Path $pyBase 'Scripts')) {{ $toolDirs += Join-Path $pyBase 'Scripts' }}
-                Get-ChildItem $pyBase -Directory -ErrorAction SilentlyContinue | ForEach-Object {{
+                $sub = Join-Path $pyBase 'Scripts'
+                if (Test-Path $sub -EA 0) {{ $toolDirs += $sub }}
+                Get-ChildItem $pyBase -Directory -EA 0 | ForEach-Object {{
                     $toolDirs += $_.FullName
-                    if (Test-Path (Join-Path $_.FullName 'Scripts')) {{ $toolDirs += Join-Path $_.FullName 'Scripts' }}
+                    $s2 = Join-Path $_.FullName 'Scripts'
+                    if (Test-Path $s2 -EA 0) {{ $toolDirs += $s2 }}
                 }}
             }}
         }}
-        # System Python installs
-        foreach ($pyRoot in @('C:\\Python314','C:\\Python313','C:\\Python312','C:\\Python311','C:\\Python310','C:\\Python39')) {{
-            if (Test-Path $pyRoot) {{ $toolDirs += $pyRoot; $toolDirs += "$pyRoot\\Scripts" }}
-        }}
-        # Conda / Miniconda / Anaconda
         foreach ($condaBase in @(
             (Join-Path $u 'miniconda3'),
             (Join-Path $u 'Anaconda3'),
             'C:\\ProgramData\\miniconda3',
             'C:\\ProgramData\\Anaconda3'
         )) {{
-            if (Test-Path $condaBase) {{
+            if (Test-Path $condaBase -EA 0) {{
                 $toolDirs += $condaBase
-                if (Test-Path (Join-Path $condaBase 'Scripts')) {{ $toolDirs += Join-Path $condaBase 'Scripts' }}
-                if (Test-Path (Join-Path $condaBase 'condabin')) {{ $toolDirs += Join-Path $condaBase 'condabin' }}
+                foreach ($s in @('Scripts','condabin')) {{
+                    $p = Join-Path $condaBase $s
+                    if (Test-Path $p -EA 0) {{ $toolDirs += $p }}
+                }}
             }}
         }}
-        # npm global
         $npmDir = Join-Path $u 'AppData\\Roaming\\npm'
-        if (Test-Path $npmDir) {{ $toolDirs += $npmDir }}
-        # Rust
+        if (Test-Path $npmDir -EA 0) {{ $toolDirs += $npmDir }}
         $cargoDir = Join-Path $u '.cargo\\bin'
-        if (Test-Path $cargoDir) {{ $toolDirs += $cargoDir }}
-        # WindowsApps (Python Store)
-        $waDir = Join-Path $u 'AppData\\Local\\Microsoft\\WindowsApps'
-        if (Test-Path $waDir) {{ $toolDirs += $waDir }}
+        if (Test-Path $cargoDir -EA 0) {{ $toolDirs += $cargoDir }}
     }}
 
     # CUDA
     foreach ($cudaVer in @('v12.6','v12.0','v11.8')) {{
         $cudaPath = "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\$cudaVer\\bin"
-        if (Test-Path $cudaPath) {{ $toolDirs += $cudaPath }}
+        if (Test-Path $cudaPath -EA 0) {{ $toolDirs += $cudaPath }}
     }}
 
-    # Add discovered paths to env
+    # Add discovered paths
     foreach ($d in $toolDirs) {{
-        if ((Test-Path $d) -and ($env:Path -notlike "*$d*")) {{
+        if ((Test-Path $d -EA 0) -and ($env:Path -notlike "*$d*")) {{
             $env:Path = "$d;" + $env:Path
         }}
     }}
+
+    $ErrorActionPreference = 'Continue'
 
     # Set working directory to sandbox
     if (Test-Path '{sandbox_dir}') {{
@@ -865,22 +895,25 @@ if ($env:USERNAME -eq '{WINDOWS_GUEST_USER}') {{
 
 def windows_setup_storage(size_gb):
     """Full Windows storage setup pipeline."""
-    print(f"  [1/6] Creating {size_gb} GB VHDX virtual disk...")
+    print(f"  [1/7] Creating {size_gb} GB VHDX virtual disk...")
     windows_create_vhdx(size_gb)
 
-    print(f"  [2/6] Creating guest user '{WINDOWS_GUEST_USER}'...")
+    print(f"  [2/7] Creating guest user '{WINDOWS_GUEST_USER}'...")
     windows_create_guest_user()
 
-    print(f"  [3/6] Setting permissions on {WINDOWS_MOUNT_DRIVE}...")
+    print(f"  [3/7] Setting permissions on {WINDOWS_MOUNT_DRIVE}...")
     windows_set_permissions()
 
-    print("  [4/6] Configuring SSH jail...")
+    print("  [4/7] Configuring SSH jail...")
     windows_configure_ssh_jail()
 
-    print("  [5/6] Configuring shell, PATH & developer tools...")
+    print("  [5/7] Configuring shell & developer tools...")
     _windows_set_default_shell()
 
-    print("  [6/6] Configuring firewall...")
+    print("  [6/7] Granting guest access to host tools...")
+    _windows_grant_tool_access()
+
+    print("  [7/7] Configuring firewall...")
     windows_configure_firewall()
 
     print("  Storage setup complete.")
