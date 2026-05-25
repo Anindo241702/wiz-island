@@ -101,6 +101,9 @@ def update_ssh_config(host, port, username="wizguest", alias="WizIsland"):
         f"    User {username}\n"
         f"    StrictHostKeyChecking no\n"
         f"    UserKnownHostsFile {known_hosts_null}\n"
+        f"    ServerAliveInterval 30\n"
+        f"    ServerAliveCountMax 5\n"
+        f"    ConnectTimeout 30\n"
     )
 
     try:

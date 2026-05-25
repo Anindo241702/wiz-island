@@ -309,6 +309,105 @@ def _windows_grant_vscode_permissions():
             logger.warning("Could not add to %s: %s", group, exc)
 
 
+def _windows_configure_guest_path():
+    """Ensure system-installed tools are accessible to the guest user.
+
+    When a new Windows user is created, they inherit the Machine PATH but
+    not per-user PATH entries from other accounts. This scans for commonly
+    installed dev tools and adds any missing paths to the Machine PATH.
+    """
+    tool_dirs = [
+        # Python
+        r"C:\Python314", r"C:\Python313", r"C:\Python312", r"C:\Python311",
+        r"C:\Python310", r"C:\Python39",
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Python"),
+        r"C:\Program Files\Python314", r"C:\Program Files\Python313",
+        r"C:\Program Files\Python312", r"C:\Program Files\Python311",
+        # Git
+        r"C:\Program Files\Git\cmd",
+        r"C:\Program Files\Git\bin",
+        r"C:\Program Files (x86)\Git\cmd",
+        # Node.js
+        r"C:\Program Files\nodejs",
+        r"C:\Program Files (x86)\nodejs",
+        # VS Code (for code CLI)
+        r"C:\Program Files\Microsoft VS Code\bin",
+        # Java
+        r"C:\Program Files\Java\jdk-21\bin",
+        r"C:\Program Files\Java\jdk-17\bin",
+        # Rust
+        os.path.join(os.environ.get("USERPROFILE", ""), ".cargo", "bin"),
+        # Go
+        r"C:\Program Files\Go\bin",
+        # CUDA
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.0\bin",
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8\bin",
+        # npm global
+        os.path.join(os.environ.get("APPDATA", ""), "npm"),
+    ]
+
+    # Also scan for Python in Users directories (per-user installs)
+    users_dir = r"C:\Users"
+    if os.path.isdir(users_dir):
+        for user_dir in os.listdir(users_dir):
+            local_programs = os.path.join(
+                users_dir, user_dir, "AppData", "Local", "Programs", "Python"
+            )
+            if os.path.isdir(local_programs):
+                for py_ver in os.listdir(local_programs):
+                    py_path = os.path.join(local_programs, py_ver)
+                    if os.path.isdir(py_path):
+                        tool_dirs.append(py_path)
+                        scripts = os.path.join(py_path, "Scripts")
+                        if os.path.isdir(scripts):
+                            tool_dirs.append(scripts)
+
+    try:
+        result = run_command(
+            'reg query "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager'
+            '\\Environment" /v Path',
+            description="read system PATH",
+            check=False,
+        )
+        if result.returncode != 0:
+            return
+
+        current_path = ""
+        for line in result.stdout.splitlines():
+            if "REG_" in line and "Path" in line:
+                current_path = line.split("REG_EXPAND_SZ")[-1].strip()
+                if not current_path:
+                    current_path = line.split("REG_SZ")[-1].strip()
+                break
+
+        path_entries = [p.strip().rstrip("\\").lower() for p in current_path.split(";") if p.strip()]
+        added = []
+
+        for tool_dir in tool_dirs:
+            if not tool_dir or not os.path.isdir(tool_dir):
+                continue
+            if tool_dir.rstrip("\\").lower() not in path_entries:
+                added.append(tool_dir)
+                path_entries.append(tool_dir.rstrip("\\").lower())
+
+        if not added:
+            logger.info("All detected tool paths already in system PATH.")
+            return
+
+        new_path = current_path.rstrip(";") + ";" + ";".join(added)
+        run_command(
+            f'setx /M Path "{new_path}"',
+            description="update system PATH with tool directories",
+            check=False,
+        )
+        logger.info("Added to system PATH: %s", ", ".join(added))
+        for p in added:
+            print(f"    + Added to PATH: {p}")
+
+    except Exception as exc:
+        logger.warning("Could not configure system PATH: %s", exc)
+
+
 def windows_create_guest_user():
     """Create a standard local user 'WizGuest' on Windows with home on X:\\."""
     password = _get_or_create_password()
@@ -608,22 +707,25 @@ def _windows_set_default_shell():
 
 def windows_setup_storage(size_gb):
     """Full Windows storage setup pipeline."""
-    print(f"  [1/6] Creating {size_gb} GB VHDX virtual disk...")
+    print(f"  [1/7] Creating {size_gb} GB VHDX virtual disk...")
     windows_create_vhdx(size_gb)
 
-    print(f"  [2/6] Creating guest user '{WINDOWS_GUEST_USER}'...")
+    print(f"  [2/7] Creating guest user '{WINDOWS_GUEST_USER}'...")
     windows_create_guest_user()
 
-    print(f"  [3/6] Setting permissions on {WINDOWS_MOUNT_DRIVE}...")
+    print(f"  [3/7] Setting permissions on {WINDOWS_MOUNT_DRIVE}...")
     windows_set_permissions()
 
-    print("  [4/6] Configuring SSH jail...")
+    print("  [4/7] Configuring SSH jail...")
     windows_configure_ssh_jail()
 
-    print("  [5/6] Setting default shell to PowerShell...")
+    print("  [5/7] Setting default shell to PowerShell...")
     _windows_set_default_shell()
 
-    print("  [6/6] Configuring firewall...")
+    print("  [6/7] Configuring developer tools PATH...")
+    _windows_configure_guest_path()
+
+    print("  [7/7] Configuring firewall...")
     windows_configure_firewall()
 
     print("  Storage setup complete.")
@@ -995,24 +1097,62 @@ def linux_configure_firewall():
         logger.warning("Could not configure ufw (SSH may still work): %s", exc)
 
 
+def _linux_configure_guest_env():
+    """Create a useful .bashrc for the guest user with PATH and aliases."""
+    workspace = os.path.join(LINUX_MOUNT_DIR, "workspace")
+    bashrc_path = os.path.join(workspace, ".bashrc")
+
+    bashrc_content = """# Wiz Island Guest Environment
+export PATH="/usr/local/cuda/bin:/usr/local/go/bin:/usr/local/bin:$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+export LD_LIBRARY_PATH="/usr/local/cuda/lib64:$LD_LIBRARY_PATH"
+
+# Aliases
+alias ll='ls -la'
+alias la='ls -A'
+alias l='ls -CF'
+
+# Welcome message
+echo ""
+echo "  Welcome to Wiz Island Sandbox"
+echo "  Workspace: $(pwd)"
+echo "  Available tools: $(which python3 2>/dev/null && echo 'python3') $(which git 2>/dev/null && echo 'git') $(which node 2>/dev/null && echo 'node') $(which gcc 2>/dev/null && echo 'gcc')"
+echo "  GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'not detected')"
+echo ""
+"""
+    try:
+        with open(bashrc_path, "w") as f:
+            f.write(bashrc_content)
+        run_command(
+            f"chown {LINUX_GUEST_USER}:{LINUX_GUEST_USER} \"{bashrc_path}\"",
+            description="chown guest .bashrc",
+            check=False,
+        )
+        logger.info("Created guest .bashrc at %s", bashrc_path)
+    except Exception as exc:
+        logger.warning("Could not create guest .bashrc: %s", exc)
+
+
 def linux_setup_storage(size_gb):
     """Full Linux storage setup pipeline."""
-    print(f"  [1/6] Creating {size_gb} GB disk image...")
+    print(f"  [1/7] Creating {size_gb} GB disk image...")
     linux_create_image(size_gb)
 
-    print(f"  [2/6] Mounting image at {LINUX_MOUNT_DIR}...")
+    print(f"  [2/7] Mounting image at {LINUX_MOUNT_DIR}...")
     linux_mount_image()
 
-    print(f"  [3/6] Creating guest user '{LINUX_GUEST_USER}'...")
+    print(f"  [3/7] Creating guest user '{LINUX_GUEST_USER}'...")
     linux_create_guest_user()
 
-    print(f"  [4/6] Setting permissions on {LINUX_MOUNT_DIR}...")
+    print(f"  [4/7] Setting permissions on {LINUX_MOUNT_DIR}...")
     linux_set_permissions()
 
-    print("  [5/6] Configuring SSH jail...")
+    print("  [5/7] Configuring SSH jail...")
     linux_configure_ssh_jail()
 
-    print("  [6/6] Configuring firewall...")
+    print("  [6/7] Configuring guest environment...")
+    _linux_configure_guest_env()
+
+    print("  [7/7] Configuring firewall...")
     linux_configure_firewall()
 
     print("  Storage setup complete.")
