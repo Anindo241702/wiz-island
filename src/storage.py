@@ -13,6 +13,7 @@ import random
 import string
 import subprocess
 import shutil
+import time
 
 logger = logging.getLogger("wiz_island.storage")
 
@@ -35,7 +36,7 @@ _guest_password = None
 
 def _generate_password(length=16):
     """Generate a secure random password."""
-    chars = string.ascii_letters + string.digits + "!@#$%&*"
+    chars = string.ascii_letters + string.digits + "!@#*_+-="
     password = "".join(random.SystemRandom().choice(chars) for _ in range(length))
     return password
 
@@ -254,7 +255,7 @@ def windows_create_guest_user():
             logger.info("User '%s' already exists. Resetting password.", WINDOWS_GUEST_USER)
             try:
                 run_command(
-                    f'net user {WINDOWS_GUEST_USER} {password}',
+                    f'net user {WINDOWS_GUEST_USER} "{password}"',
                     description="reset WizGuest password",
                 )
             except Exception as exc:
@@ -265,7 +266,7 @@ def windows_create_guest_user():
 
     try:
         run_command(
-            f'net user {WINDOWS_GUEST_USER} {password} /add /active:yes '
+            f'net user {WINDOWS_GUEST_USER} "{password}" /add /active:yes '
             f'/comment:"Wiz Island Guest Account" /passwordchg:no',
             description="create WizGuest user",
         )
@@ -296,12 +297,63 @@ def windows_set_permissions():
         raise
 
 
+def _windows_validate_sshd_config():
+    """Test sshd_config syntax using sshd -t. Returns True if valid."""
+    sshd_exe = shutil.which("sshd")
+    if not sshd_exe:
+        sshd_exe = r"C:\Windows\System32\OpenSSH\sshd.exe"
+        if not os.path.exists(sshd_exe):
+            logger.warning("sshd.exe not found; skipping config validation.")
+            return True
+    try:
+        result = run_command(
+            f'"{sshd_exe}" -t',
+            description="validate sshd_config",
+            check=False,
+        )
+        if result.returncode == 0:
+            logger.info("sshd_config syntax check passed.")
+            return True
+        logger.error("sshd_config syntax check failed: %s", result.stderr.strip())
+        return False
+    except Exception as exc:
+        logger.warning("Could not validate sshd_config: %s", exc)
+        return True
+
+
+def _windows_restart_sshd():
+    """Restart the sshd service on Windows with robust error handling."""
+    # Stop sshd (ignore errors if it's not running)
+    run_command("net stop sshd", description="stop sshd service", check=False)
+
+    # Brief pause to allow the service to fully release resources
+    time.sleep(2)
+
+    # Start sshd
+    try:
+        run_command("net start sshd", description="start sshd service")
+        logger.info("sshd service restarted successfully.")
+    except Exception:
+        # Fallback: try sc command
+        logger.warning("net start failed, trying sc start...")
+        try:
+            run_command("sc start sshd", description="sc start sshd", check=False)
+            time.sleep(3)
+            result = run_command("sc query sshd", description="query sshd status", check=False)
+            if "RUNNING" in result.stdout:
+                logger.info("sshd service started via sc.")
+                return
+        except Exception:
+            pass
+        raise
+
+
 def windows_configure_ssh_jail():
     """Append a Match User block to sshd_config to jail WizGuest into X:\\."""
     match_block = (
         f"\n\n# --- Wiz Island SSH Jail ---\n"
         f"Match User {WINDOWS_GUEST_USER}\n"
-        f'    ForceCommand cmd.exe /k "cd /d {WINDOWS_MOUNT_DRIVE}\\"\n'
+        f"    ForceCommand cmd.exe /k cd /d {WINDOWS_MOUNT_DRIVE}\n"
     )
 
     try:
@@ -314,19 +366,48 @@ def windows_configure_ssh_jail():
             logger.info("SSH jail block already exists in sshd_config.")
             return
 
+        # Back up the original config before modifying
+        backup_path = WINDOWS_SSHD_CONFIG + ".wiz_backup"
+        try:
+            with open(backup_path, "w") as f:
+                f.write(existing)
+        except IOError as exc:
+            logger.warning("Could not create sshd_config backup: %s", exc)
+
         with open(WINDOWS_SSHD_CONFIG, "a") as f:
             f.write(match_block)
         logger.info("Appended SSH jail block for '%s' to sshd_config.", WINDOWS_GUEST_USER)
 
-        run_command(
-            "net stop sshd && net start sshd",
-            description="restart sshd service",
-        )
+        # Validate config before restarting
+        if not _windows_validate_sshd_config():
+            logger.error("sshd_config is invalid after modification. Restoring backup.")
+            if os.path.exists(backup_path):
+                with open(WINDOWS_SSHD_CONFIG, "w") as f:
+                    f.write(existing)
+                logger.info("Restored sshd_config from backup.")
+            raise RuntimeError("sshd_config validation failed after adding SSH jail block.")
+
+        _windows_restart_sshd()
+
     except IOError as exc:
         logger.error("Failed to modify sshd_config: %s", exc)
         raise
+    except RuntimeError:
+        raise
     except Exception as exc:
-        logger.error("Failed to restart SSH service: %s", exc)
+        logger.error("Failed to configure SSH jail: %s", exc)
+        # Try to restore backup if restart failed
+        backup_path = WINDOWS_SSHD_CONFIG + ".wiz_backup"
+        if os.path.exists(backup_path):
+            try:
+                with open(backup_path, "r") as f:
+                    original = f.read()
+                with open(WINDOWS_SSHD_CONFIG, "w") as f:
+                    f.write(original)
+                logger.info("Restored sshd_config from backup after failure.")
+                run_command("net start sshd", description="restart sshd after restore", check=False)
+            except Exception as restore_exc:
+                logger.error("Failed to restore sshd_config: %s", restore_exc)
         raise
 
 
@@ -450,8 +531,9 @@ def windows_teardown():
                 with open(WINDOWS_SSHD_CONFIG, "w") as f:
                     f.write(cleaned)
                 logger.info("Removed SSH jail block from sshd_config.")
-                run_command("net stop sshd && net start sshd",
-                            description="restart sshd", check=False)
+                run_command("net stop sshd", description="stop sshd", check=False)
+                time.sleep(2)
+                run_command("net start sshd", description="start sshd", check=False)
     except Exception as exc:
         logger.warning("Could not clean sshd_config: %s", exc)
 
@@ -646,12 +728,26 @@ def linux_configure_ssh_jail():
             f.write(match_block)
         logger.info("Appended SSH jail block for '%s' to sshd_config.", LINUX_GUEST_USER)
 
+        # Validate config before restarting
+        result = run_command(
+            "sshd -t", description="validate sshd_config", check=False,
+        )
+        if result.returncode != 0:
+            logger.error("sshd_config validation failed: %s", result.stderr.strip())
+            # Restore original config
+            with open(sshd_config, "w") as f:
+                f.write(existing)
+            logger.info("Restored original sshd_config.")
+            raise RuntimeError("sshd_config validation failed after adding SSH jail block.")
+
         run_command(
             "systemctl restart sshd || systemctl restart ssh",
             description="restart sshd service",
         )
     except IOError as exc:
         logger.error("Failed to modify sshd_config: %s", exc)
+        raise
+    except RuntimeError:
         raise
     except Exception as exc:
         logger.error("Failed to restart SSH service: %s", exc)
