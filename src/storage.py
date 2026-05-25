@@ -372,45 +372,77 @@ def _windows_scan_tool_paths():
                 found.append(candidate)
                 seen.add(norm)
 
-    # Scan for per-user Python installs (AppData\Local\Programs\Python)
+    # Scan per-user directories for tools
     users_dir = r"C:\Users"
     if os.path.isdir(users_dir):
         for user_dir in os.listdir(users_dir):
-            for base in [
-                os.path.join(users_dir, user_dir, "AppData", "Local", "Programs", "Python"),
-                os.path.join(users_dir, user_dir, "miniconda3"),
-                os.path.join(users_dir, user_dir, "Anaconda3"),
-            ]:
-                if os.path.isdir(base):
-                    # Add the base and common subdirs
-                    for sub in ["", "Scripts", "condabin"]:
-                        d = os.path.join(base, sub) if sub else base
-                        if os.path.isdir(d):
-                            norm = d.rstrip("\\").lower()
-                            if norm not in seen:
-                                found.append(d)
-                                seen.add(norm)
-                    # For Python, check version subdirectories
-                    if "Python" in base:
-                        for py_ver in os.listdir(base):
-                            py_path = os.path.join(base, py_ver)
-                            if os.path.isdir(py_path):
-                                for sub in ["", "Scripts"]:
-                                    d = os.path.join(py_path, sub) if sub else py_path
-                                    if os.path.isdir(d):
-                                        norm = d.rstrip("\\").lower()
-                                        if norm not in seen:
-                                            found.append(d)
-                                            seen.add(norm)
+            user_path = os.path.join(users_dir, user_dir)
+            if not os.path.isdir(user_path):
+                continue
 
-    # Scan for npm global modules
-    for user_dir in (os.listdir(users_dir) if os.path.isdir(users_dir) else []):
-        npm_dir = os.path.join(users_dir, user_dir, "AppData", "Roaming", "npm")
-        if os.path.isdir(npm_dir):
-            norm = npm_dir.rstrip("\\").lower()
-            if norm not in seen:
-                found.append(npm_dir)
-                seen.add(norm)
+            # All known per-user tool locations
+            per_user_dirs = [
+                # Python — multiple known install locations
+                os.path.join(user_path, "AppData", "Local", "Programs", "Python"),
+                os.path.join(user_path, "AppData", "Local", "Python"),
+                os.path.join(user_path, "AppData", "Local", "Python", "bin"),
+                # Conda
+                os.path.join(user_path, "miniconda3"),
+                os.path.join(user_path, "miniconda3", "Scripts"),
+                os.path.join(user_path, "miniconda3", "condabin"),
+                os.path.join(user_path, "Anaconda3"),
+                os.path.join(user_path, "Anaconda3", "Scripts"),
+                os.path.join(user_path, "Anaconda3", "condabin"),
+                # npm global
+                os.path.join(user_path, "AppData", "Roaming", "npm"),
+                # Rust
+                os.path.join(user_path, ".cargo", "bin"),
+                # WindowsApps (Python Store version)
+                os.path.join(user_path, "AppData", "Local",
+                             "Microsoft", "WindowsApps"),
+            ]
+
+            for d in per_user_dirs:
+                if os.path.isdir(d):
+                    norm = d.rstrip("\\").lower()
+                    if norm not in seen:
+                        found.append(d)
+                        seen.add(norm)
+
+            # Check Programs\Python version subdirectories
+            programs_python = os.path.join(
+                user_path, "AppData", "Local", "Programs", "Python"
+            )
+            if os.path.isdir(programs_python):
+                for py_ver in os.listdir(programs_python):
+                    py_path = os.path.join(programs_python, py_ver)
+                    if os.path.isdir(py_path):
+                        for sub in ["", "Scripts"]:
+                            d = os.path.join(py_path, sub) if sub else py_path
+                            if os.path.isdir(d):
+                                norm = d.rstrip("\\").lower()
+                                if norm not in seen:
+                                    found.append(d)
+                                    seen.add(norm)
+
+    # Fallback: use 'where.exe' to find tools the scanner might have missed
+    for tool in ["python", "python3", "git", "node", "npm", "conda",
+                 "go", "rustc", "java", "nvcc"]:
+        try:
+            result = subprocess.run(
+                ["where.exe", tool],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                for line in result.stdout.strip().splitlines():
+                    tool_dir = os.path.dirname(line.strip())
+                    if tool_dir and os.path.isdir(tool_dir):
+                        norm = tool_dir.rstrip("\\").lower()
+                        if norm not in seen:
+                            found.append(tool_dir)
+                            seen.add(norm)
+        except Exception:
+            pass
 
     return found
 
