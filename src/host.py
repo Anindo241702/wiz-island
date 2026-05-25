@@ -1,11 +1,10 @@
 """
 WIZ ISLAND - Host-Side Orchestration & Dashboard (host.py)
 
-Handles Ngrok tunnel creation, real-time system monitoring dashboard,
+Handles Pinggy tunnel creation, real-time system monitoring dashboard,
 and host-mode lifecycle management.
 """
 
-import json
 import logging
 import os
 import platform
@@ -15,7 +14,6 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.request
 
 import psutil
 
@@ -24,7 +22,7 @@ from . import storage
 logger = logging.getLogger("wiz_island.host")
 
 # Global state
-_ngrok_process = None
+_tunnel_process = None
 _tunnel_url = None
 _running = False
 _start_time = None
@@ -74,143 +72,87 @@ def prompt_storage_quota():
             return None
 
 
-def prompt_ngrok_authtoken():
-    """Prompt the user for their Ngrok auth token and apply it."""
-    print("\n  You can get your AuthToken from: https://dashboard.ngrok.com/get-started/your-authtoken")
-    token = input("  Enter your Ngrok AuthToken: ").strip()
-    if not token:
-        print("  [ERROR] AuthToken cannot be empty.")
-        return False
+def start_pinggy_tunnel():
+    """Start a Pinggy TCP tunnel on port 22 and parse the public URL.
 
-    try:
-        storage.run_command(
-            f"ngrok config add-authtoken {token}",
-            description="apply Ngrok authtoken",
-        )
-        print("  Ngrok AuthToken applied successfully.")
-        return True
-    except Exception as exc:
-        logger.error("Failed to apply Ngrok authtoken: %s", exc)
-        print(f"  [ERROR] Failed to apply AuthToken: {exc}")
-        return False
-
-
-def _show_ngrok_error(stdout_text, stderr_text):
-    """Display ngrok error output and helpful suggestions."""
-    all_output = ((stdout_text or "") + "\n" + (stderr_text or "")).strip()
-
-    if all_output:
-        print()
-        print("  --- Ngrok Output ---")
-        for line in all_output.split("\n"):
-            line = line.strip()
-            if line:
-                print(f"  {line}")
-        print("  ---------------------")
-        print()
-
-    lower_output = all_output.lower()
-    if "invalid" in lower_output and "authtoken" in lower_output:
-        print("  Your AuthToken appears to be invalid.")
-        print("  Get a new one from: https://dashboard.ngrok.com/get-started/your-authtoken")
-    elif "err_ngrok_108" in lower_output or "already running" in lower_output:
-        print("  Another Ngrok tunnel is already running (free tier allows only 1).")
-        print("  Close any other Ngrok sessions first.")
-    elif "upgrade" in lower_output or "paid" in lower_output or "subscription" in lower_output:
-        print("  Your Ngrok plan may not support TCP tunnels.")
-        print("  TCP tunnels require a paid Ngrok plan (Personal or higher).")
-        print("  Upgrade at: https://dashboard.ngrok.com/billing/subscription")
-    elif "err_ngrok_4018" in lower_output:
-        print("  Ngrok requires a verified account with an AuthToken.")
-        print("  Sign up: https://dashboard.ngrok.com/signup")
-        print("  Install: https://dashboard.ngrok.com/get-started/your-authtoken")
-    elif not all_output:
-        print("  Possible causes:")
-        print("    - Invalid or expired AuthToken")
-        print("    - Another Ngrok tunnel already running (free tier: 1 max)")
-        print("    - TCP tunnels require a paid Ngrok plan")
-        print("    - Network/firewall blocking Ngrok")
-        print("  AuthToken: https://dashboard.ngrok.com/get-started/your-authtoken")
-        print("  Upgrade:   https://dashboard.ngrok.com/billing/subscription")
-    else:
-        print("  Possible causes:")
-        print("    - Invalid or expired AuthToken")
-        print("    - Another Ngrok tunnel already running (free tier: 1 max)")
-        print("    - TCP tunnels require a paid Ngrok plan")
-        print("    - Network/firewall blocking Ngrok")
-
-
-def start_ngrok_tunnel():
-    """Start an Ngrok TCP tunnel on port 22 and detect the public URL.
-
-    Starts ngrok as a background process, then polls the ngrok local API
-    at 127.0.0.1:4040 to discover the tunnel URL. This approach is more
-    reliable across platforms than parsing stdout.
+    Uses SSH to create a reverse TCP tunnel via pinggy.io. No account
+    or auth token required — works out of the box on free tier.
     """
-    global _ngrok_process, _tunnel_url
+    global _tunnel_process, _tunnel_url
 
-    print("\n  Starting Ngrok TCP tunnel on port 22...")
+    print("\n  Starting Pinggy TCP tunnel on port 22...")
+    print("  (Free tunnel via pinggy.io — no account required)")
+
+    ssh_cmd = [
+        "ssh", "-p", "443",
+        "-R", "0:localhost:22",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "ServerAliveInterval=60",
+        "tcp@a.pinggy.io",
+    ]
 
     try:
-        _ngrok_process = subprocess.Popen(
-            ["ngrok", "tcp", "22"],
+        _tunnel_process = subprocess.Popen(
+            ssh_cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
             text=True,
         )
     except FileNotFoundError:
-        logger.error("Ngrok binary not found in PATH.")
-        print("  [ERROR] Ngrok is not installed or not in PATH.")
-        print("  Please ensure Ngrok is installed and accessible.")
+        logger.error("SSH client not found in PATH.")
+        print("  [ERROR] SSH client (ssh) is not installed or not in PATH.")
+        print("  OpenSSH Client is required for the Pinggy tunnel.")
+        if platform.system() == "Windows":
+            print("  Install: Settings > Apps > Optional Features > OpenSSH Client")
+        else:
+            print("  Install: sudo apt-get install openssh-client")
         return None
     except Exception as exc:
-        logger.error("Failed to start Ngrok: %s", exc)
-        print(f"  [ERROR] Failed to start Ngrok: {exc}")
+        logger.error("Failed to start Pinggy tunnel: %s", exc)
+        print(f"  [ERROR] Failed to start tunnel: {exc}")
         return None
 
-    # Give ngrok a moment to start or fail
-    time.sleep(3)
+    url_pattern = re.compile(r"(tcp://[\w\.\-]+:\d+)")
+    deadline = time.time() + 30
 
-    # Check if ngrok exited immediately (auth error, plan limit, etc.)
-    if _ngrok_process.poll() is not None:
-        stdout_text = _ngrok_process.stdout.read() if _ngrok_process.stdout else ""
-        stderr_text = _ngrok_process.stderr.read() if _ngrok_process.stderr else ""
-        logger.error("Ngrok exited. stdout: %s | stderr: %s", stdout_text, stderr_text)
-        print("  [ERROR] Ngrok exited unexpectedly.")
-        _show_ngrok_error(stdout_text, stderr_text)
-        return None
-
-    # Poll the ngrok local API for the tunnel URL
     print("  Waiting for tunnel to establish...")
-    for attempt in range(15):
-        # Check if process died while waiting
-        if _ngrok_process.poll() is not None:
-            stdout_text = _ngrok_process.stdout.read() if _ngrok_process.stdout else ""
-            stderr_text = _ngrok_process.stderr.read() if _ngrok_process.stderr else ""
-            logger.error("Ngrok died during polling. stdout: %s | stderr: %s",
-                         stdout_text, stderr_text)
-            print("  [ERROR] Ngrok process terminated.")
-            _show_ngrok_error(stdout_text, stderr_text)
+
+    while time.time() < deadline:
+        if _tunnel_process.poll() is not None:
+            remaining = _tunnel_process.stdout.read() if _tunnel_process.stdout else ""
+            logger.error("Pinggy tunnel exited. Output: %s", remaining)
+            print("  [ERROR] Tunnel process exited unexpectedly.")
+            if remaining.strip():
+                print()
+                print("  --- Tunnel Output ---")
+                for out_line in remaining.strip().split("\n"):
+                    out_line = out_line.strip()
+                    if out_line:
+                        print(f"  {out_line}")
+                print("  ----------------------")
+                print()
+            print("  Possible causes:")
+            print("    - No internet connection")
+            print("    - SSH client not working properly")
+            print("    - Firewall blocking outbound SSH on port 443")
             return None
 
-        try:
-            resp = urllib.request.urlopen(
-                "http://127.0.0.1:4040/api/tunnels", timeout=5
-            )
-            data = json.loads(resp.read().decode())
-            for tunnel in data.get("tunnels", []):
-                public_url = tunnel.get("public_url", "")
-                if public_url.startswith("tcp://"):
-                    _tunnel_url = public_url
-                    logger.info("Ngrok tunnel established: %s", _tunnel_url)
-                    return _tunnel_url
-        except Exception as exc:
-            logger.debug("Ngrok API attempt %d: %s", attempt + 1, exc)
+        line = _tunnel_process.stdout.readline()
+        if not line:
+            time.sleep(0.5)
+            continue
 
-        time.sleep(2)
+        line_stripped = line.strip()
+        logger.debug("pinggy: %s", line_stripped)
+        match = url_pattern.search(line)
+        if match:
+            _tunnel_url = match.group(1)
+            logger.info("Pinggy tunnel established: %s", _tunnel_url)
+            return _tunnel_url
 
-    print("  [ERROR] Could not determine Ngrok tunnel URL after 30 seconds.")
-    print("  Please check your Ngrok AuthToken and internet connection.")
+    print("  [ERROR] Could not detect tunnel URL within 30 seconds.")
+    print("  Please check your internet connection.")
     return None
 
 
@@ -417,22 +359,22 @@ def _progress_bar(percent, width=20):
     return f"[{bar}]"
 
 
-def stop_ngrok():
-    """Terminate the Ngrok process."""
-    global _ngrok_process, _tunnel_url
+def stop_tunnel():
+    """Terminate the Pinggy tunnel process."""
+    global _tunnel_process, _tunnel_url
     with _lock:
-        if _ngrok_process:
+        if _tunnel_process:
             try:
-                _ngrok_process.terminate()
-                _ngrok_process.wait(timeout=10)
-                logger.info("Ngrok process terminated.")
+                _tunnel_process.terminate()
+                _tunnel_process.wait(timeout=10)
+                logger.info("Tunnel process terminated.")
             except subprocess.TimeoutExpired:
-                _ngrok_process.kill()
-                logger.warning("Ngrok process killed forcefully.")
+                _tunnel_process.kill()
+                logger.warning("Tunnel process killed forcefully.")
             except Exception as exc:
-                logger.error("Error stopping Ngrok: %s", exc)
+                logger.error("Error stopping tunnel: %s", exc)
             finally:
-                _ngrok_process = None
+                _tunnel_process = None
                 _tunnel_url = None
 
 
@@ -470,8 +412,8 @@ def panic_shutdown():
     print("  ============================================================")
     print("  Initiating emergency shutdown sequence...\n")
 
-    print("  [1/4] Stopping Ngrok tunnel...")
-    stop_ngrok()
+    print("  [1/4] Stopping tunnel...")
+    stop_tunnel()
     print("         Done.")
 
     print("  [2/4] Terminating guest SSH sessions...")
@@ -550,15 +492,10 @@ def run_host_mode():
         input("\n  Press Enter to return to the menu...")
         return
 
-    # Step 2: Ngrok AuthToken
-    if not prompt_ngrok_authtoken():
-        input("\n  Press Enter to return to the menu...")
-        return
-
-    # Step 3: Start tunnel
-    tunnel_url = start_ngrok_tunnel()
+    # Step 2: Start tunnel
+    tunnel_url = start_pinggy_tunnel()
     if not tunnel_url:
-        print("  [ERROR] Could not establish Ngrok tunnel.")
+        print("  [ERROR] Could not establish tunnel.")
         input("\n  Press Enter to return to the menu...")
         return
 

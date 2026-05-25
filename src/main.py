@@ -266,7 +266,7 @@ def main():
             print("  ============================================================")
             print()
             print("   This will:")
-            print("   - Stop the Ngrok tunnel")
+            print("   - Stop the tunnel")
             print("   - Kill all guest SSH sessions")
             print("   - Unmount virtual disks")
             print("   - Delete guest user accounts")

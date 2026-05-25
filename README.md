@@ -2,7 +2,7 @@
 
 **Serverless Peer-to-Peer SSH Tunneling Tool** | v1.1.0
 
-Wiz Island is a CLI tool written in Python that allows a client to connect securely to a Host machine's CPU/GPU/RAM/Storage over an SSH tunnel via Ngrok. The tool configures everything automatically on both Windows and Debian-based Linux (Ubuntu/Kali).
+Wiz Island is a CLI tool written in Python that allows a client to connect securely to a Host machine's CPU/GPU/RAM/Storage over an SSH tunnel via Pinggy. The tool configures everything automatically on both Windows and Debian-based Linux (Ubuntu/Kali). No accounts or API keys required.
 
 > **New to Wiz Island?** Read the [**User Manual (MANUAL.md)**](MANUAL.md) for step-by-step instructions with screenshots.
 
@@ -14,7 +14,7 @@ Wiz Island is a CLI tool written in Python that allows a client to connect secur
  |  Wiz Island CLI  |                  |  Wiz Island CLI  |
  |  (Host Mode)     |                  |  (User Mode)     |
  |                  |                  |                  |
- |  +------------+  |   Ngrok TCP     |  SSH Config      |
+ |  +------------+  |  Pinggy TCP     |  SSH Config      |
  |  | Sandbox    |<-|--  Tunnel  -----|->Injection       |
  |  | (VHDX/EXT4)|  |   (Port 22)    |                  |
  |  +------------+  |                  |  VS Code         |
@@ -24,7 +24,7 @@ Wiz Island is a CLI tool written in Python that allows a client to connect secur
  +------------------+                  +------------------+
 ```
 
-- **Host Machine**: Becomes the SSH server, spins up a secure Ngrok TCP tunnel, and isolates user workspaces in a virtual disk.
+- **Host Machine**: Becomes the SSH server, spins up a secure Pinggy TCP tunnel, and isolates user workspaces in a virtual disk.
 - **Client Machine**: Inputs the connection string, updates their local SSH config, and connects via terminal or VS Code.
 
 ## Project Structure
@@ -48,7 +48,7 @@ wiz-island/
 ## Requirements
 
 - **Python 3.10+**
-- **Ngrok account** (free tier works) - [sign up here](https://ngrok.com/)
+- **No accounts needed** — uses [Pinggy](https://pinggy.io) free tunnel (via SSH)
 - **Administrator/root** privileges (for Host Mode)
 
 ## Quick Start
@@ -56,7 +56,7 @@ wiz-island/
 ### Windows
 
 1. Right-click `setup.bat` and select **Run as Administrator**
-2. The script auto-installs Python, OpenSSH Server, Ngrok, and firewall rules
+2. The script auto-installs Python, OpenSSH Server/Client, and firewall rules
 3. The Wiz Island CLI launches automatically
 
 ### Linux (Ubuntu/Debian)
@@ -129,7 +129,7 @@ python src/main.py --mode terminate    # Skip menu, run cleanup
 - Guest home directories are set to the **sandbox workspace**
 - Passwords are **randomly generated** for each session (16 chars, mixed)
 - The **Panic Button** provides immediate full cleanup
-- All traffic is encrypted through Ngrok's tunnel
+- All traffic is encrypted through Pinggy's SSH tunnel
 
 ## Documentation
 

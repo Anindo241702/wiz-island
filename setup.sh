@@ -27,7 +27,7 @@ log_error() {
 }
 
 echo -e "${CYAN}============================================================${NC}"
-echo -e "${CYAN}  WIZ ISLAND - Linux Bootstrapper  v1.0.0${NC}"
+echo -e "${CYAN}  WIZ ISLAND - Linux Bootstrapper  v1.1.0${NC}"
 echo -e "${CYAN}============================================================${NC}"
 echo
 echo -e "  Detected: $(uname -s) $(uname -r)"
@@ -145,63 +145,17 @@ else
     log_info "ufw not found, skipping firewall configuration."
 fi
 
-# --- Install Ngrok if missing ---
-if ! command -v ngrok &> /dev/null; then
-    log_info "Installing Ngrok..."
-    ARCH=$(uname -m)
-    case "$ARCH" in
-        x86_64)  NGROK_ARCH="amd64" ;;
-        aarch64) NGROK_ARCH="arm64" ;;
-        armv7l)  NGROK_ARCH="arm" ;;
-        i686)    NGROK_ARCH="386" ;;
-        *)
-            log_error "Unsupported architecture: $ARCH"
-            log_info "Please install Ngrok manually from https://ngrok.com/download"
-            exit 1
-            ;;
-    esac
-
-    # Try the official Ngrok v3 install method first
-    if command -v curl &> /dev/null; then
-        log_info "Downloading Ngrok for ${NGROK_ARCH} (v3)..."
-        curl -s https://ngrok-agent.s3.amazonaws.com/ngrok-v3-stable-linux-${NGROK_ARCH}.tgz -o /tmp/ngrok.tgz
-        if [ $? -eq 0 ] && [ -f /tmp/ngrok.tgz ]; then
-            tar -xzf /tmp/ngrok.tgz -C /usr/local/bin 2>/dev/null
-            if [ $? -eq 0 ]; then
-                chmod +x /usr/local/bin/ngrok
-                rm -f /tmp/ngrok.tgz
-                log_info "Ngrok v3 installed successfully."
-            else
-                log_warn "Failed to extract Ngrok v3, trying v2..."
-            fi
-        fi
-    fi
-
-    # Fallback to v2 if v3 failed
-    if ! command -v ngrok &> /dev/null; then
-        NGROK_URL="https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v2-stable-linux-${NGROK_ARCH}.tgz"
-        log_info "Downloading Ngrok v2 for ${NGROK_ARCH}..."
-        if command -v wget &> /dev/null; then
-            wget -qO /tmp/ngrok.tgz "$NGROK_URL"
-        elif command -v curl &> /dev/null; then
-            curl -sL -o /tmp/ngrok.tgz "$NGROK_URL"
-        else
-            log_error "Neither wget nor curl is available. Cannot download Ngrok."
-            log_info "Please install Ngrok manually from https://ngrok.com/download"
-            exit 1
-        fi
-
-        if [ $? -ne 0 ]; then
-            log_error "Failed to download Ngrok."
-            exit 1
-        fi
-        tar -xzf /tmp/ngrok.tgz -C /usr/local/bin
-        chmod +x /usr/local/bin/ngrok
-        rm -f /tmp/ngrok.tgz
-        log_info "Ngrok v2 installed successfully."
+# --- Ensure SSH client is available (needed for Pinggy tunnel) ---
+if ! command -v ssh &> /dev/null; then
+    log_info "Installing OpenSSH Client..."
+    $PKG_INSTALL openssh-client 2>/dev/null || $PKG_INSTALL openssh-clients 2>/dev/null || true
+    if command -v ssh &> /dev/null; then
+        log_info "SSH client installed."
+    else
+        log_warn "SSH client not found. It is required for the Pinggy tunnel."
     fi
 else
-    log_info "Ngrok is already installed: $(ngrok version 2>/dev/null || echo 'version unknown')"
+    log_info "SSH client is available."
 fi
 
 # --- Install Python dependencies ---

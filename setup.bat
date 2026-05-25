@@ -16,7 +16,7 @@ if %errorlevel% neq 0 (
 )
 
 echo ============================================================
-echo   WIZ ISLAND - Windows Bootstrapper  v1.0.0
+echo   WIZ ISLAND - Windows Bootstrapper  v1.1.0
 echo ============================================================
 echo.
 echo   Detected: Windows %OS%
@@ -106,23 +106,20 @@ if %errorlevel% neq 0 (
     echo [WizIsland] Firewall rule already configured.
 )
 
-:: --- Install Ngrok if missing ---
-echo [WizIsland] Checking for Ngrok...
-where ngrok >nul 2>&1
+:: --- Ensure OpenSSH Client is available (needed for Pinggy tunnel) ---
+echo [WizIsland] Checking for SSH client...
+where ssh >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [WizIsland] Ngrok not found. Installing via winget...
-    winget install -e --id Ngrok.Ngrok --accept-source-agreements --accept-package-agreements
+    echo [WizIsland] SSH client not found. Installing...
+    powershell -Command "Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0"
     if %errorlevel% neq 0 (
-        echo [ERROR] Failed to install Ngrok via winget.
-        echo [INFO]  Please install Ngrok manually from https://ngrok.com/download
-        pause
-        exit /b 1
+        echo [WARNING] Could not install SSH client automatically.
+        echo [INFO]    Install via: Settings ^> Apps ^> Optional Features ^> OpenSSH Client
+    ) else (
+        echo [WizIsland] SSH client installed successfully.
     )
-    echo [WizIsland] Ngrok installed successfully.
-    :: Add common Ngrok install paths
-    set "PATH=%LOCALAPPDATA%\ngrok;%ProgramFiles%\ngrok;%PATH%"
 ) else (
-    echo [WizIsland] Ngrok is already installed.
+    echo [WizIsland] SSH client is available.
 )
 
 :: --- Install Python dependencies ---

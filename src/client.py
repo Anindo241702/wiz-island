@@ -1,7 +1,7 @@
 """
 WIZ ISLAND - Client-Side SSH Configuration Injection (client.py)
 
-Handles parsing of the Ngrok connection string, updating the local
+Handles parsing of the tunnel connection string, updating the local
 SSH config file, and providing connection instructions for VS Code
 Remote-SSH.
 """
@@ -23,13 +23,13 @@ def get_ssh_config_path():
         return os.path.expanduser("~/.ssh/config")
 
 
-def parse_ngrok_url(url_string):
-    """Parse the Ngrok TCP URL into (host, port).
+def parse_tunnel_url(url_string):
+    """Parse a tunnel TCP URL into (host, port).
 
     Accepts formats like:
-        tcp://0.tcp.ngrok.io:12345
-        0.tcp.ngrok.io:12345
-        ssh wizguest@0.tcp.ngrok.io -p 12345
+        tcp://hostname.pinggy.link:12345
+        hostname.pinggy.link:12345
+        ssh wizguest@hostname -p 12345
     """
     url_string = url_string.strip()
 
@@ -278,25 +278,25 @@ def run_user_mode():
         input("  Press Enter to return to the menu...")
         return
 
-    # Prompt for the Ngrok URL
+    # Prompt for the tunnel URL
     print("\n  Enter the connection details provided by the Host operator.")
     print("  (You can find these on the Host's dashboard screen.)")
     print()
     print("  Accepted formats:")
-    print("    - tcp://0.tcp.ngrok.io:12345")
-    print("    - 0.tcp.ngrok.io:12345")
-    print("    - ssh wizguest@0.tcp.ngrok.io -p 12345")
-    url_string = input("\n  Paste the Ngrok connection string: ").strip()
+    print("    - tcp://hostname.pinggy.link:12345")
+    print("    - hostname.pinggy.link:12345")
+    print("    - ssh wizguest@hostname -p 12345")
+    url_string = input("\n  Paste the tunnel connection string: ").strip()
 
     if not url_string:
         print("  [ERROR] Connection string cannot be empty.")
         input("  Press Enter to return to the menu...")
         return
 
-    host, port = parse_ngrok_url(url_string)
+    host, port = parse_tunnel_url(url_string)
     if not host or not port:
         print(f"  [ERROR] Invalid connection string format: '{url_string}'")
-        print("  Expected format: tcp://0.tcp.ngrok.io:12345 or 0.tcp.ngrok.io:12345")
+        print("  Expected format: tcp://hostname.pinggy.link:12345 or hostname:12345")
         input("  Press Enter to return to the menu...")
         return
 

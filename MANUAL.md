@@ -14,7 +14,7 @@ A comprehensive guide for new users to set up, configure, and use Wiz Island for
    - [Windows Installation](#31-windows-installation)
    - [Linux Installation](#32-linux-installation-ubuntudebian)
    - [Manual Installation](#33-manual-installation)
-4. [Getting an Ngrok Account](#4-getting-an-ngrok-account)
+4. [Tunnel Provider (Pinggy)](#4-tunnel-provider-pinggy)
 5. [Using Wiz Island](#5-using-wiz-island)
    - [Launching the Application](#51-launching-the-application)
    - [Host Mode](#52-host-mode-sharing-your-machine)
@@ -35,7 +35,7 @@ A comprehensive guide for new users to set up, configure, and use Wiz Island for
 Wiz Island is a **serverless, peer-to-peer CLI tool** that allows you to securely share your computer's resources (CPU, GPU, RAM, and storage) with another person over an SSH tunnel, without needing a dedicated server.
 
 **How it works:**
-- The **Host** runs Wiz Island on their machine, which creates an isolated sandbox environment and opens a secure tunnel via Ngrok.
+- The **Host** runs Wiz Island on their machine, which creates an isolated sandbox environment and opens a secure tunnel via Pinggy.
 - The **Client/User** receives a connection string and uses it to connect to the Host's machine through SSH.
 - Everything is set up automatically — no manual SSH server configuration needed.
 
@@ -57,7 +57,7 @@ Wiz Island is a **serverless, peer-to-peer CLI tool** that allows you to securel
 | **Python**    | 3.10 or higher                                 |
 | **RAM**       | 2 GB minimum (4 GB+ recommended)               |
 | **Disk**      | Enough free space for the sandbox (user-defined)|
-| **Internet**  | Required for Ngrok tunnel                      |
+| **Internet**  | Required for Pinggy tunnel                     |
 | **Privileges**| Administrator (Windows) or root/sudo (Linux)   |
 
 ### Software Dependencies (Auto-Installed)
@@ -66,7 +66,7 @@ These are installed automatically by the setup scripts:
 
 - **Python 3.10+** — Core application runtime
 - **OpenSSH Server** — SSH connectivity
-- **Ngrok** — Secure tunnel provider
+- **OpenSSH Client** — Required for Pinggy tunnel
 - **psutil** — System monitoring library (Python)
 
 ---
@@ -83,7 +83,7 @@ These are installed automatically by the setup scripts:
    - Check for Administrator privileges (re-launches with UAC if needed)
    - Install Python via `winget` (if not present)
    - Install OpenSSH Server (if not present)
-   - Install Ngrok via `winget` (if not present)
+   - Ensure OpenSSH Client is available (for Pinggy tunnel)
    - Configure Windows Firewall rules for SSH
    - Install Python dependencies (`psutil`)
    - Launch the Wiz Island CLI
@@ -107,7 +107,7 @@ These are installed automatically by the setup scripts:
    - Detect your package manager (apt-get, dnf, or yum)
    - Install Python3 and pip (if not present)
    - Install OpenSSH Server (if not present)
-   - Download and install the Ngrok binary for your architecture
+   - Ensure SSH client is available (for Pinggy tunnel)
    - Configure firewall rules via `ufw` (if available)
    - Install Python dependencies (`psutil`)
    - Launch the Wiz Island CLI
@@ -120,12 +120,11 @@ If you prefer to install dependencies yourself:
 
 1. Install Python 3.10+ from [python.org](https://python.org)
 2. Install OpenSSH Server for your platform
-3. Install Ngrok from [ngrok.com/download](https://ngrok.com/download)
-4. Install Python dependencies:
+3. Install Python dependencies:
    ```bash
    pip install -r requirements.txt
    ```
-5. Launch the application:
+4. Launch the application:
    ```bash
    python src/main.py        # Windows
    python3 src/main.py       # Linux
@@ -133,18 +132,16 @@ If you prefer to install dependencies yourself:
 
 ---
 
-## 4. Getting an Ngrok Account
+## 4. Tunnel Provider (Pinggy)
 
-Wiz Island uses Ngrok to create secure TCP tunnels. You need a **free Ngrok account**:
+Wiz Island uses [Pinggy](https://pinggy.io) to create secure TCP tunnels. **No account or sign-up is required** — the tunnel is established via a standard SSH command.
 
-1. Go to [https://ngrok.com/](https://ngrok.com/) and click **Sign Up**.
-2. Create an account (you can use Google/GitHub to sign in).
-3. After logging in, go to [Your Authtoken](https://dashboard.ngrok.com/get-started/your-authtoken).
-4. Copy your **AuthToken** — you'll need this when running Host Mode.
+Pinggy's free tier provides:
+- Free TCP tunnels with randomly assigned URLs
+- No authentication tokens needed
+- Works through standard SSH (port 443)
 
-> **Important:** Keep your AuthToken private. Anyone with your token can create tunnels under your account.
-
-> **Free tier limits:** The free Ngrok plan allows 1 online tunnel at a time with randomly assigned URLs. This is sufficient for most Wiz Island use cases.
+> **Note:** Free tunnels have a session time limit. If the tunnel disconnects, simply restart Host Mode to get a new tunnel URL.
 
 ---
 
@@ -200,20 +197,11 @@ Enter how much disk space to allocate for the guest sandbox. This creates an iso
 
 If a previous setup is detected, you'll be asked whether to reuse it or start fresh.
 
-#### Step 2: Ngrok AuthToken
+#### Step 2: Tunnel Creation
 
-```
-  You can get your AuthToken from: https://dashboard.ngrok.com/get-started/your-authtoken
-  Enter your Ngrok AuthToken: 2abc123def456...
-```
+The application automatically starts a Pinggy TCP tunnel on port 22 (SSH) via SSH. No account or token is needed. This typically takes 5-10 seconds.
 
-Paste your Ngrok AuthToken. The application will configure it automatically.
-
-#### Step 3: Tunnel Creation
-
-The application starts an Ngrok TCP tunnel on port 22 (SSH). This typically takes 5-10 seconds.
-
-#### Step 4: Dashboard
+#### Step 3: Dashboard
 
 Once the tunnel is established, a real-time dashboard appears:
 
@@ -222,8 +210,8 @@ Once the tunnel is established, a real-time dashboard appears:
    WIZ ISLAND - HOST DASHBOARD
   ============================================================
 
-   TUNNEL URL       : tcp://0.tcp.ngrok.io:12345
-   SSH Command      : ssh wizguest@0.tcp.ngrok.io -p 12345
+   TUNNEL URL       : tcp://rnuap-xxx.a.free.pinggy.link:12345
+   SSH Command      : ssh wizguest@rnuap-xxx.a.free.pinggy.link -p 12345
    Guest Password   : aB3xK9mP2qR7wF_
    Uptime           : 5m 23s
 
@@ -280,12 +268,12 @@ Select **[2] USER MODE** from the main menu. You'll see a sub-menu:
 1. Select **[1] Connect to a Host**
 2. Paste the connection string provided by the Host:
    ```
-   Paste the Ngrok connection string: tcp://0.tcp.ngrok.io:12345
+   Paste the tunnel connection string: tcp://rnuap-xxx.a.free.pinggy.link:12345
    ```
    Accepted formats:
-   - `tcp://0.tcp.ngrok.io:12345`
-   - `0.tcp.ngrok.io:12345`
-   - `ssh wizguest@0.tcp.ngrok.io -p 12345`
+   - `tcp://rnuap-xxx.a.free.pinggy.link:12345`
+   - `rnuap-xxx.a.free.pinggy.link:12345`
+   - `ssh wizguest@rnuap-xxx.a.free.pinggy.link -p 12345`
 
 3. The application will:
    - Parse the connection details
@@ -301,7 +289,7 @@ Select **[2] USER MODE** from the main menu. You'll see a sub-menu:
    ```
    Or:
    ```bash
-   ssh wizguest@0.tcp.ngrok.io -p 12345
+   ssh wizguest@rnuap-xxx.a.free.pinggy.link -p 12345
    ```
 
 #### Cleaning SSH Config
@@ -314,7 +302,7 @@ Select **[3] TERMINATE** from the main menu (or press `x` + Enter while the dash
 
 This performs a complete cleanup:
 
-1. **Stops the Ngrok tunnel** — No more external connections
+1. **Stops the Pinggy tunnel** — No more external connections
 2. **Kills all guest SSH sessions** — Immediately disconnects any connected users
 3. **Unmounts virtual disks** — Safely detaches the sandbox storage
 4. **Deletes guest accounts** — Removes the temporary user account
@@ -331,7 +319,7 @@ The dashboard provides real-time monitoring of your system while hosting:
 
 | Metric | Description |
 |--------|-------------|
-| **Tunnel URL** | The public Ngrok TCP address for connections |
+| **Tunnel URL** | The public Pinggy TCP address for connections |
 | **SSH Command** | Ready-to-copy command for the guest |
 | **Guest Password** | Randomly generated password for this session |
 | **Uptime** | How long the session has been active |
@@ -408,9 +396,9 @@ python src/main.py -m terminate
 
 ### Common Issues
 
-#### "Ngrok exited unexpectedly"
-- **Cause:** Invalid AuthToken or network issue
-- **Fix:** Verify your AuthToken at https://dashboard.ngrok.com. Check your internet connection. Ensure no other Ngrok tunnel is running (free tier allows only 1).
+#### "Tunnel process exited unexpectedly"
+- **Cause:** Network issue or SSH client problem
+- **Fix:** Check your internet connection. Ensure the SSH client is installed and working. Ensure no firewall is blocking outbound connections on port 443.
 
 #### "Storage setup failed"
 - **Cause:** Insufficient privileges or disk space
@@ -429,8 +417,8 @@ python src/main.py -m terminate
 - **Fix:** Make sure the Host has shared the correct password. The password is randomly generated each session and shown on the Host dashboard.
 
 #### Dashboard shows "0 Active SSH Conns" even when connected
-- **Cause:** The connection counter checks port 22 directly; Ngrok traffic arrives on a different port
-- **Fix:** This is expected behavior. The counter tracks direct SSH connections. Your connection through Ngrok is still active.
+- **Cause:** The connection counter checks port 22 directly; tunneled traffic arrives on a different port
+- **Fix:** This is expected behavior. The counter tracks direct SSH connections. Your connection through the tunnel is still active.
 
 ### Log Files
 
@@ -463,15 +451,14 @@ If you encounter issues not covered here:
 - **SSH Configuration:** The guest account is restricted via `sshd_config` Match User rules
 - **No Sudo Access:** The guest account has no administrator/root privileges
 - **Random Passwords:** A new secure password is generated for each session
-- **Encrypted Tunnel:** All traffic goes through Ngrok's encrypted TCP tunnel
+- **Encrypted Tunnel:** All traffic goes through Pinggy's SSH-encrypted TCP tunnel
 - **Panic Button:** Instant full cleanup at any time
 
 ### What You Should Be Aware Of
 
 - **Resource Sharing:** The guest has access to your CPU, RAM, and GPU while connected. Monitor usage via the dashboard.
-- **AuthToken Security:** Keep your Ngrok AuthToken private. Don't share it publicly.
 - **Password Sharing:** Only share the guest password with people you trust.
-- **Network Exposure:** While the Ngrok tunnel is active, anyone with the URL and password can attempt to connect.
+- **Network Exposure:** While the Pinggy tunnel is active, anyone with the URL and password can attempt to connect.
 - **Session Duration:** Don't leave a session running indefinitely without monitoring.
 
 ### Best Practices
@@ -487,7 +474,7 @@ If you encounter issues not covered here:
 ## 11. FAQ
 
 **Q: Is Wiz Island free to use?**
-A: Yes. Wiz Island is free. Ngrok's free tier provides sufficient functionality for peer-to-peer connections.
+A: Yes. Wiz Island is completely free. It uses Pinggy's free tier for tunneling, which requires no account or payment.
 
 **Q: Can the guest access my personal files?**
 A: The guest's home directory is set to the sandbox workspace. While they have shell access for VS Code compatibility, they don't have administrator/root privileges and their default workspace is the isolated sandbox.
@@ -499,7 +486,7 @@ A: No. The guest account is a standard user with no elevated privileges.
 A: Technically yes, but it's not recommended. Each mode is designed for one role per session.
 
 **Q: What happens if I lose internet while hosting?**
-A: The Ngrok tunnel will disconnect. Connected users will be dropped. When your internet returns, you'll need to restart Host Mode to get a new tunnel URL.
+A: The Pinggy tunnel will disconnect. Connected users will be dropped. When your internet returns, you'll need to restart Host Mode to get a new tunnel URL.
 
 **Q: Can multiple users connect at the same time?**
 A: Yes, multiple SSH sessions can connect using the same credentials. All users share the same sandbox.
@@ -532,14 +519,8 @@ After running Terminate:
 1. **Delete the project folder** containing Wiz Island
 2. **Optionally uninstall** the auto-installed dependencies:
 
-   **Windows:**
-   ```
-   winget uninstall Ngrok.Ngrok
-   ```
-
    **Linux:**
    ```bash
-   sudo rm /usr/local/bin/ngrok
    sudo apt-get remove openssh-server  # Only if you don't need SSH
    ```
 
