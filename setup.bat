@@ -76,6 +76,21 @@ echo [WizIsland] Configuring OpenSSH Server service...
 sc config sshd start= auto >nul 2>&1
 net start sshd >nul 2>&1
 
+:: --- Ensure password authentication is enabled for SSH ---
+echo [WizIsland] Checking SSH password authentication...
+if exist "C:\ProgramData\ssh\sshd_config" (
+    findstr /i "^PasswordAuthentication no" "C:\ProgramData\ssh\sshd_config" >nul 2>&1
+    if %errorlevel% equ 0 (
+        echo [WizIsland] Enabling SSH password authentication...
+        powershell -Command "(Get-Content 'C:\ProgramData\ssh\sshd_config') -replace '^PasswordAuthentication no','PasswordAuthentication yes' | Set-Content 'C:\ProgramData\ssh\sshd_config'"
+        net stop sshd >nul 2>&1
+        timeout /t 2 /nobreak >nul 2>&1
+        net start sshd >nul 2>&1
+    ) else (
+        echo [WizIsland] SSH password authentication is already enabled.
+    )
+)
+
 :: --- Configure Windows Firewall for SSH ---
 echo [WizIsland] Checking firewall rules...
 netsh advfirewall firewall show rule name="WizIsland SSH" >nul 2>&1

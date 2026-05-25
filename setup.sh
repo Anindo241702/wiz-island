@@ -118,6 +118,24 @@ elif command -v service &> /dev/null; then
 fi
 log_info "SSH service configured."
 
+# --- Ensure password authentication is enabled for SSH ---
+log_info "Checking SSH password authentication..."
+SSHD_CONFIG="/etc/ssh/sshd_config"
+if [ -f "$SSHD_CONFIG" ]; then
+    if grep -qE "^\s*PasswordAuthentication\s+no" "$SSHD_CONFIG"; then
+        log_info "Enabling SSH password authentication..."
+        sed -i 's/^\s*PasswordAuthentication\s\+no/PasswordAuthentication yes/' "$SSHD_CONFIG"
+        if command -v systemctl &> /dev/null; then
+            systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+        elif command -v service &> /dev/null; then
+            service ssh restart 2>/dev/null || service sshd restart 2>/dev/null || true
+        fi
+        log_info "SSH password authentication enabled."
+    else
+        log_info "SSH password authentication is already enabled."
+    fi
+fi
+
 # --- Configure firewall (ufw) if available ---
 if command -v ufw &> /dev/null; then
     log_info "Configuring firewall (ufw)..."

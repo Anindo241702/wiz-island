@@ -1,6 +1,6 @@
 # Wiz Island - User Manual
 
-**Version 1.0.0**
+**Version 1.1.0**
 
 A comprehensive guide for new users to set up, configure, and use Wiz Island for peer-to-peer SSH tunneling.
 
@@ -184,7 +184,7 @@ After installation, the CLI presents an interactive menu:
 
 ### 5.2 Host Mode (Sharing Your Machine)
 
-Select **[1] HOST MODE** from the main menu. The setup process has 4 steps:
+Select **[1] HOST MODE** from the main menu. The setup process has several steps:
 
 #### Step 1: Storage Quota
 
@@ -224,7 +224,7 @@ Once the tunnel is established, a real-time dashboard appears:
 
    TUNNEL URL       : tcp://0.tcp.ngrok.io:12345
    SSH Command      : ssh wizguest@0.tcp.ngrok.io -p 12345
-   Guest Password   : aB3$xK9mP2qR7wF!
+   Guest Password   : aB3xK9mP2qR7wF_
    Uptime           : 5m 23s
 
   ------------------------------------------------------------
@@ -256,11 +256,14 @@ Once the tunnel is established, a real-time dashboard appears:
   ============================================================
 ```
 
-**Share these details with your guest:**
-- The **SSH Command** line
-- The **Guest Password**
+**After the tunnel is established, a connection summary is displayed.**
 
-The dashboard refreshes every 2 seconds with live system metrics.
+Share these details with your guest:
+- The **Tunnel URL** (or the **SSH Command** line)
+- The **Guest Username** (WizGuest on Windows, wizguest on Linux)
+- The **Guest Password** (randomly generated each session)
+
+Press Enter to launch the live dashboard, which refreshes every 2 seconds.
 
 ### 5.3 User Mode (Connecting to a Host)
 
@@ -287,9 +290,10 @@ Select **[2] USER MODE** from the main menu. You'll see a sub-menu:
 3. The application will:
    - Parse the connection details
    - Test TCP connectivity to the host
-   - Ask for the guest username (default: `wizguest`)
+   - Ask for the guest username (WizGuest for Windows hosts, wizguest for Linux hosts)
+   - Optionally accept the guest password for display in instructions
    - Update your `~/.ssh/config` file
-   - Display connection instructions
+   - Display detailed connection instructions for terminal and VS Code
 
 4. Connect using one of the provided methods:
    ```bash
@@ -360,16 +364,19 @@ VS Code's **Remote - SSH** extension provides the best experience for developmen
 2. Press `Ctrl+Shift+P` (or `Cmd+Shift+P` on macOS)
 3. Type: **"Remote-SSH: Connect to Host..."**
 4. Select **"WizIsland"** from the dropdown
-5. Enter the guest password when prompted
-6. VS Code will install its server component and open a remote window
+5. Select the platform type (Linux/Windows) when prompted
+6. Enter the guest password when prompted
+7. VS Code will install its remote server component and open a remote window
 
 ### Working Remotely
 
 Once connected:
 - The **Explorer** panel shows the Host's sandbox filesystem
-- The **Terminal** runs on the Host machine
-- You have full access to the Host's CPU/RAM/GPU for builds and tasks
+- The **Terminal** runs on the Host machine with full shell access
+- You have full access to the Host's CPU, RAM, GPU, and storage for builds and tasks
 - File editing happens locally; saves are synced to the Host
+- You can install VS Code extensions on the remote side for full IDE features
+- Python, Node.js, compilers, and other tools installed on the Host are available
 
 ---
 
@@ -452,8 +459,8 @@ If you encounter issues not covered here:
 
 ### What Wiz Island Does for Security
 
-- **Isolated Sandbox:** Guest users are confined to a virtual disk — they cannot access your main filesystem
-- **SSH Jailing:** The guest account is locked into the sandbox directory via `sshd_config`
+- **Isolated Sandbox:** Guest users start in an isolated virtual disk workspace
+- **SSH Configuration:** The guest account is restricted via `sshd_config` Match User rules
 - **No Sudo Access:** The guest account has no administrator/root privileges
 - **Random Passwords:** A new secure password is generated for each session
 - **Encrypted Tunnel:** All traffic goes through Ngrok's encrypted TCP tunnel
@@ -483,7 +490,7 @@ If you encounter issues not covered here:
 A: Yes. Wiz Island is free. Ngrok's free tier provides sufficient functionality for peer-to-peer connections.
 
 **Q: Can the guest access my personal files?**
-A: No. The guest is confined to the sandbox virtual disk. They cannot navigate to your personal files, home directory, or system folders.
+A: The guest's home directory is set to the sandbox workspace. While they have shell access for VS Code compatibility, they don't have administrator/root privileges and their default workspace is the isolated sandbox.
 
 **Q: Does the guest get root/admin access?**
 A: No. The guest account is a standard user with no elevated privileges.
@@ -540,4 +547,4 @@ After running Terminate:
 
 ---
 
-*Wiz Island v1.0.0 - Serverless P2P SSH Tunneling Tool*
+*Wiz Island v1.1.0 - Serverless P2P SSH Tunneling Tool*

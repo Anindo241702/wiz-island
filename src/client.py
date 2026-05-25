@@ -179,9 +179,8 @@ def remove_ssh_config(alias="WizIsland"):
 
 
 def print_connection_instructions(host, port, config_path, username="wizguest",
-                                  alias="WizIsland", reachable=None):
+                                  alias="WizIsland", reachable=None, password=None):
     """Print detailed connection instructions for the user."""
-    # Connection status indicator
     if reachable is True:
         status = "REACHABLE"
     elif reachable is False:
@@ -201,6 +200,10 @@ def print_connection_instructions(host, port, config_path, username="wizguest",
         f"   Target Port        : {port}",
         f"   Username           : {username}",
         f"   Connection Status  : {status}",
+    ]
+    if password:
+        lines.append(f"   Password           : {password}")
+    lines.extend([
         "",
         "  ------------------------------------------------------------",
         "   HOW TO CONNECT",
@@ -212,25 +215,37 @@ def print_connection_instructions(host, port, config_path, username="wizguest",
         "   OPTION 2: Terminal SSH (Manual)",
         f"     $ ssh {username}@{host} -p {port}",
         "",
-        "   OPTION 3: VS Code Remote-SSH",
+        "   OPTION 3: VS Code Remote-SSH (Recommended for Development)",
         "     1. Install the 'Remote - SSH' extension in VS Code",
         "        (Extension ID: ms-vscode-remote.remote-ssh)",
         "     2. Press Ctrl+Shift+P (or Cmd+Shift+P on macOS)",
         "     3. Type: 'Remote-SSH: Connect to Host...'",
         f"     4. Select '{alias}' from the dropdown list",
         "     5. Enter the password when prompted",
+        "     6. VS Code will install its remote server and open a window",
+        "",
+        "   AFTER CONNECTING VIA VS CODE:",
+        "     - The Explorer panel shows the Host's sandbox filesystem",
+        "     - The Terminal runs on the Host machine",
+        "     - You have access to Host's CPU, RAM, GPU for builds",
+        "     - Install extensions on the remote side for full IDE features",
         "",
         "  ------------------------------------------------------------",
         "   TIPS",
         "  ------------------------------------------------------------",
-        "   - The guest password is provided by the Host operator.",
-        "   - Ask the Host for the password before connecting.",
+    ])
+    if not password:
+        lines.extend([
+            "   - Ask the Host operator for the guest password.",
+            "   - The Host dashboard shows the password to share.",
+        ])
+    lines.extend([
         "   - StrictHostKeyChecking is disabled for convenience.",
         "   - To remove this config later, select 'Clean SSH Config'",
         "     from the User Mode menu.",
         "",
         "  ============================================================",
-    ]
+    ])
     print("\n".join(lines))
 
 
@@ -264,7 +279,10 @@ def run_user_mode():
         return
 
     # Prompt for the Ngrok URL
-    print("\n  Accepted formats:")
+    print("\n  Enter the connection details provided by the Host operator.")
+    print("  (You can find these on the Host's dashboard screen.)")
+    print()
+    print("  Accepted formats:")
     print("    - tcp://0.tcp.ngrok.io:12345")
     print("    - 0.tcp.ngrok.io:12345")
     print("    - ssh wizguest@0.tcp.ngrok.io -p 12345")
@@ -288,23 +306,39 @@ def run_user_mode():
     print("  Testing connection...")
     reachable = test_connection(host, port)
     if reachable:
-        print("  Connection test: SUCCESS")
+        print("  Connection test: SUCCESS - Host is reachable!")
     else:
         print("  Connection test: Host not reachable (it may not be ready yet)")
         print("  The SSH config will be saved anyway — you can try connecting later.")
 
-    # Detect platform-appropriate username
-    username = "wizguest"  # Linux default
+    # Guest username - auto-detect based on Host's platform
+    default_username = "WizGuest" if platform.system() == "Windows" else "wizguest"
+    print(f"\n  The default guest username depends on the Host's OS:")
+    print(f"    - Windows Host: WizGuest")
+    print(f"    - Linux Host:   wizguest")
     try:
         user_choice = input(
-            f"\n  Guest username [{username}]: "
+            f"\n  Guest username [{default_username}]: "
         ).strip()
         if user_choice:
             username = user_choice
+        else:
+            username = default_username
+    except (EOFError, KeyboardInterrupt):
+        username = default_username
+
+    # Ask for password (optional, just to display it in instructions)
+    password = None
+    try:
+        password = input(
+            "  Guest password (press Enter to skip): "
+        ).strip()
+        if not password:
+            password = None
     except (EOFError, KeyboardInterrupt):
         pass
 
-    print("  Updating SSH config...")
+    print("\n  Updating SSH config...")
 
     try:
         config_path = update_ssh_config(host, port, username=username)
@@ -313,6 +347,9 @@ def run_user_mode():
         input("  Press Enter to return to the menu...")
         return
 
-    print_connection_instructions(host, port, config_path, username=username, reachable=reachable)
+    print_connection_instructions(
+        host, port, config_path, username=username,
+        reachable=reachable, password=password,
+    )
 
     input("  Press Enter to return to the main menu...")

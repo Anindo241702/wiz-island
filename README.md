@@ -1,6 +1,6 @@
 # Wiz Island
 
-**Serverless Peer-to-Peer SSH Tunneling Tool** | v1.0.0
+**Serverless Peer-to-Peer SSH Tunneling Tool** | v1.1.0
 
 Wiz Island is a CLI tool written in Python that allows a client to connect securely to a Host machine's CPU/GPU/RAM/Storage over an SSH tunnel via Ngrok. The tool configures everything automatically on both Windows and Debian-based Linux (Ubuntu/Kali).
 
@@ -108,7 +108,7 @@ python src/main.py --mode terminate    # Skip menu, run cleanup
 | Mount Point | Drive X:\ |
 | Guest User | WizGuest (standard local account) |
 | Permissions | icacls (restricted to WizGuest + Admins) |
-| SSH Jail | sshd_config Match User + ForceCommand |
+| SSH Config | sshd_config Match User + home dir restriction |
 | Firewall | netsh advfirewall rule for port 22 |
 
 ### Linux
@@ -119,14 +119,14 @@ python src/main.py --mode terminate    # Skip menu, run cleanup
 | Mount Point | /mnt/wizsandbox |
 | Guest User | wizguest (no sudo) |
 | Permissions | root-owned chroot + user-owned workspace |
-| SSH Jail | sshd_config ChrootDirectory + internal-sftp |
+| SSH Config | sshd_config Match User + home dir restriction |
 | Firewall | ufw allow 22/tcp |
 
 ## Security
 
 - Guest accounts have **no administrator/root** privileges
 - Virtual disks are **isolated** from the host filesystem
-- SSH sessions are **jailed** to the sandbox directory
+- Guest home directories are set to the **sandbox workspace**
 - Passwords are **randomly generated** for each session (16 chars, mixed)
 - The **Panic Button** provides immediate full cleanup
 - All traffic is encrypted through Ngrok's tunnel

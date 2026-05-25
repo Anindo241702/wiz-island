@@ -108,7 +108,7 @@ def start_ngrok_tunnel():
 
     try:
         _ngrok_process = subprocess.Popen(
-            ["ngrok", "tcp", "22", "--log", "stdout", "--log-format", "term"],
+            ["ngrok", "tcp", "22", "--log", "stdout", "--log-format", "logfmt"],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -220,6 +220,52 @@ def _format_bytes(num_bytes):
     return f"{num_bytes:.1f} PB"
 
 
+def _get_gpu_info():
+    """Detect GPU information if available."""
+    # Try NVIDIA GPU via nvidia-smi
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,utilization.gpu",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            parts = result.stdout.strip().split(", ")
+            if len(parts) >= 2:
+                return f"{parts[0]} ({parts[1]}% utilization)"
+            return parts[0]
+    except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+        pass
+
+    # Try to detect via platform-specific methods
+    if platform.system() == "Windows":
+        try:
+            result = subprocess.run(
+                ["wmic", "path", "win32_VideoController", "get", "name"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                lines = [l.strip() for l in result.stdout.strip().split("\n") if l.strip() and l.strip() != "Name"]
+                if lines:
+                    return lines[0]
+        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+            pass
+    else:
+        try:
+            result = subprocess.run(
+                ["lspci"], capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                for line in result.stdout.split("\n"):
+                    if "VGA" in line or "3D" in line or "Display" in line:
+                        name = line.split(": ", 1)[-1] if ": " in line else line
+                        return name.strip()[:60]
+        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+            pass
+
+    return "Not detected"
+
+
 def render_dashboard():
     """Render the real-time dashboard to the terminal."""
     global _running, _start_time
@@ -282,6 +328,7 @@ def render_dashboard():
                 f"   RAM Usage        : {_progress_bar(mem.percent)} {mem.percent:.1f}%"
                 f"  ({mem.used // (1024**2)} / {mem.total // (1024**2)} MB)",
                 f"   RAM Available    : {_format_bytes(mem.available)}",
+                f"   GPU             : {_get_gpu_info()}",
                 "",
                 "  ------------------------------------------------------------",
                 "   STORAGE (Sandbox)",
@@ -470,8 +517,26 @@ def run_host_mode():
         input("\n  Press Enter to return to the menu...")
         return
 
-    print(f"\n  Tunnel established: {tunnel_url}")
-    print("  Launching dashboard...\n")
+    # Display connection details prominently for sharing
+    guest_user, guest_pass = storage.get_guest_credentials()
+    print()
+    print("  ============================================================")
+    print("   TUNNEL ESTABLISHED - SHARE THESE WITH YOUR GUEST")
+    print("  ============================================================")
+    print(f"   Tunnel URL     : {tunnel_url}")
+    print(f"   SSH Command    : ssh {guest_user}@"
+          f"{tunnel_url.replace('tcp://', '').split(':')[0]} "
+          f"-p {tunnel_url.replace('tcp://', '').split(':')[1]}")
+    print(f"   Guest Username : {guest_user}")
+    print(f"   Guest Password : {guest_pass}")
+    print("  ============================================================")
+    print()
+    print("  Copy the above details and send them to your guest.")
+    print("  The guest should run Wiz Island in User Mode and paste")
+    print("  the connection string, or connect via VS Code Remote-SSH.")
+    print()
+    input("  Press Enter to launch the live dashboard...")
+    print()
 
     # Step 4: Launch dashboard with panic listener
     listener_thread = threading.Thread(target=panic_listener, daemon=True)

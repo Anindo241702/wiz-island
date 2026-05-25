@@ -242,7 +242,7 @@ def windows_create_vhdx(size_gb):
 
 
 def windows_create_guest_user():
-    """Create a standard local user 'WizGuest' on Windows."""
+    """Create a standard local user 'WizGuest' on Windows with home on X:\\."""
     password = _get_or_create_password()
 
     try:
@@ -260,6 +260,15 @@ def windows_create_guest_user():
                 )
             except Exception as exc:
                 logger.warning("Could not reset password: %s", exc)
+            # Ensure home directory is set to the sandbox drive
+            try:
+                run_command(
+                    f'net user {WINDOWS_GUEST_USER} /homedir:{WINDOWS_MOUNT_DRIVE}\\',
+                    description="set WizGuest home directory",
+                    check=False,
+                )
+            except Exception as exc:
+                logger.warning("Could not set home directory: %s", exc)
             return
     except Exception as exc:
         logger.warning("Could not check user existence: %s", exc)
@@ -267,10 +276,11 @@ def windows_create_guest_user():
     try:
         run_command(
             f'net user {WINDOWS_GUEST_USER} "{password}" /add /active:yes '
+            f'/homedir:{WINDOWS_MOUNT_DRIVE}\\ '
             f'/comment:"Wiz Island Guest Account" /passwordchg:no',
             description="create WizGuest user",
         )
-        logger.info("Created user '%s'.", WINDOWS_GUEST_USER)
+        logger.info("Created user '%s' with home %s.", WINDOWS_GUEST_USER, WINDOWS_MOUNT_DRIVE)
     except Exception as exc:
         logger.error("Failed to create user '%s': %s", WINDOWS_GUEST_USER, exc)
         raise
@@ -348,12 +358,43 @@ def _windows_restart_sshd():
         raise
 
 
+def _windows_ensure_password_auth():
+    """Ensure PasswordAuthentication is enabled in sshd_config for guest logins."""
+    try:
+        if not os.path.exists(WINDOWS_SSHD_CONFIG):
+            return
+        with open(WINDOWS_SSHD_CONFIG, "r") as f:
+            content = f.read()
+
+        import re
+        # Enable PasswordAuthentication if it's explicitly disabled
+        if re.search(r"^\s*PasswordAuthentication\s+no", content, re.MULTILINE):
+            content = re.sub(
+                r"^(\s*)PasswordAuthentication\s+no",
+                r"\1PasswordAuthentication yes",
+                content,
+                flags=re.MULTILINE,
+            )
+            with open(WINDOWS_SSHD_CONFIG, "w") as f:
+                f.write(content)
+            logger.info("Enabled PasswordAuthentication in sshd_config.")
+    except Exception as exc:
+        logger.warning("Could not check/set PasswordAuthentication: %s", exc)
+
+
 def windows_configure_ssh_jail():
-    """Append a Match User block to sshd_config to jail WizGuest into X:\\."""
+    """Configure sshd_config to restrict WizGuest to the sandbox drive.
+
+    Uses a Match User block with the user's home directory set to X:\\
+    so VS Code Remote-SSH can install its server and work properly.
+    ForceCommand is NOT used because it prevents VS Code from functioning.
+    """
     match_block = (
-        f"\n\n# --- Wiz Island SSH Jail ---\n"
+        f"\n# --- Wiz Island SSH Jail ---\n"
         f"Match User {WINDOWS_GUEST_USER}\n"
-        f"    ForceCommand cmd.exe /k cd /d {WINDOWS_MOUNT_DRIVE}\n"
+        f"    PasswordAuthentication yes\n"
+        f"    AllowTcpForwarding no\n"
+        f"    PermitTunnel no\n"
     )
 
     try:
@@ -374,18 +415,45 @@ def windows_configure_ssh_jail():
         except IOError as exc:
             logger.warning("Could not create sshd_config backup: %s", exc)
 
-        with open(WINDOWS_SSHD_CONFIG, "a") as f:
-            f.write(match_block)
-        logger.info("Appended SSH jail block for '%s' to sshd_config.", WINDOWS_GUEST_USER)
+        # Enable password auth globally if needed
+        _windows_ensure_password_auth()
+        # Re-read after possible modification
+        if os.path.exists(WINDOWS_SSHD_CONFIG):
+            with open(WINDOWS_SSHD_CONFIG, "r") as f:
+                existing = f.read()
+
+        # Insert BEFORE any existing 'Match Group' block at the end,
+        # because Windows sshd_config often has:
+        #   Match Group administrators
+        #       AuthorizedKeysFile ...
+        # Appending after it would nest our directives incorrectly.
+        import re
+        admin_match = re.search(
+            r"\n(Match\s+Group\s+administrators)", existing, re.IGNORECASE
+        )
+        if admin_match:
+            insert_pos = admin_match.start()
+            new_content = (
+                existing[:insert_pos]
+                + match_block + "\n"
+                + existing[insert_pos:]
+            )
+        else:
+            new_content = existing.rstrip() + "\n" + match_block
+
+        with open(WINDOWS_SSHD_CONFIG, "w") as f:
+            f.write(new_content)
+        logger.info("Added SSH config block for '%s' to sshd_config.", WINDOWS_GUEST_USER)
 
         # Validate config before restarting
         if not _windows_validate_sshd_config():
             logger.error("sshd_config is invalid after modification. Restoring backup.")
             if os.path.exists(backup_path):
                 with open(WINDOWS_SSHD_CONFIG, "w") as f:
-                    f.write(existing)
+                    with open(backup_path, "r") as bk:
+                        f.write(bk.read())
                 logger.info("Restored sshd_config from backup.")
-            raise RuntimeError("sshd_config validation failed after adding SSH jail block.")
+            raise RuntimeError("sshd_config validation failed after adding SSH config block.")
 
         _windows_restart_sshd()
 
@@ -395,7 +463,7 @@ def windows_configure_ssh_jail():
     except RuntimeError:
         raise
     except Exception as exc:
-        logger.error("Failed to configure SSH jail: %s", exc)
+        logger.error("Failed to configure SSH: %s", exc)
         # Try to restore backup if restart failed
         backup_path = WINDOWS_SSHD_CONFIG + ".wiz_backup"
         if os.path.exists(backup_path):
@@ -630,8 +698,9 @@ def linux_mount_image():
 
 
 def linux_create_guest_user():
-    """Create a dedicated system user 'wizguest' with no sudo privileges."""
+    """Create a dedicated system user 'wizguest' with home in the sandbox workspace."""
     password = _get_or_create_password()
+    workspace = os.path.join(LINUX_MOUNT_DIR, "workspace")
 
     try:
         result = run_command(
@@ -648,20 +717,30 @@ def linux_create_guest_user():
                 )
             except Exception as exc:
                 logger.warning("Could not reset password: %s", exc)
+            # Ensure home directory is set to workspace
+            try:
+                run_command(
+                    f"usermod -d \"{workspace}\" -s /bin/bash {LINUX_GUEST_USER}",
+                    description="set wizguest home and shell",
+                    check=False,
+                )
+            except Exception as exc:
+                logger.warning("Could not update home directory: %s", exc)
             return
     except Exception as exc:
         logger.warning("Could not check user existence: %s", exc)
 
     try:
+        os.makedirs(workspace, exist_ok=True)
         run_command(
-            f"useradd -m -s /bin/bash -d \"{LINUX_MOUNT_DIR}\" {LINUX_GUEST_USER}",
+            f"useradd -m -s /bin/bash -d \"{workspace}\" {LINUX_GUEST_USER}",
             description="create wizguest user",
         )
         run_command(
             f"echo '{LINUX_GUEST_USER}:{password}' | chpasswd",
             description="set wizguest password",
         )
-        logger.info("Created user '%s' with home at %s.", LINUX_GUEST_USER, LINUX_MOUNT_DIR)
+        logger.info("Created user '%s' with home at %s.", LINUX_GUEST_USER, workspace)
     except Exception as exc:
         logger.error("Failed to create user '%s': %s", LINUX_GUEST_USER, exc)
         raise
@@ -701,17 +780,47 @@ def linux_set_permissions():
         raise
 
 
+def _linux_ensure_password_auth():
+    """Ensure PasswordAuthentication is enabled in sshd_config."""
+    sshd_config = "/etc/ssh/sshd_config"
+    try:
+        if not os.path.exists(sshd_config):
+            return
+        with open(sshd_config, "r") as f:
+            content = f.read()
+
+        import re
+        if re.search(r"^\s*PasswordAuthentication\s+no", content, re.MULTILINE):
+            content = re.sub(
+                r"^(\s*)PasswordAuthentication\s+no",
+                r"\1PasswordAuthentication yes",
+                content,
+                flags=re.MULTILINE,
+            )
+            with open(sshd_config, "w") as f:
+                f.write(content)
+            logger.info("Enabled PasswordAuthentication in sshd_config.")
+    except Exception as exc:
+        logger.warning("Could not check/set PasswordAuthentication: %s", exc)
+
+
 def linux_configure_ssh_jail():
-    """Append a Match User block to sshd_config to jail wizguest."""
+    """Configure sshd_config to restrict wizguest to the sandbox.
+
+    Sets the user's home directory to the sandbox workspace so they
+    land there by default. Does NOT use ChrootDirectory or
+    ForceCommand internal-sftp, because those prevent VS Code
+    Remote-SSH from installing its server and working properly.
+    """
+    workspace = os.path.join(LINUX_MOUNT_DIR, "workspace")
     sshd_config = "/etc/ssh/sshd_config"
     match_block = (
         f"\n\n# --- Wiz Island SSH Jail ---\n"
         f"Match User {LINUX_GUEST_USER}\n"
-        f"    ChrootDirectory {LINUX_MOUNT_DIR}\n"
-        f"    ForceCommand internal-sftp\n"
+        f"    PasswordAuthentication yes\n"
         f"    AllowTcpForwarding no\n"
         f"    X11Forwarding no\n"
-        f"    PasswordAuthentication yes\n"
+        f"    PermitTunnel no\n"
     )
 
     try:
@@ -724,9 +833,24 @@ def linux_configure_ssh_jail():
             logger.info("SSH jail block already exists in sshd_config.")
             return
 
+        # Back up original config
+        backup_path = sshd_config + ".wiz_backup"
+        try:
+            with open(backup_path, "w") as f:
+                f.write(existing)
+        except IOError as exc:
+            logger.warning("Could not create sshd_config backup: %s", exc)
+
+        # Enable password auth globally if needed
+        _linux_ensure_password_auth()
+        # Re-read after possible modification
+        if os.path.exists(sshd_config):
+            with open(sshd_config, "r") as f:
+                existing = f.read()
+
         with open(sshd_config, "a") as f:
             f.write(match_block)
-        logger.info("Appended SSH jail block for '%s' to sshd_config.", LINUX_GUEST_USER)
+        logger.info("Appended SSH config block for '%s' to sshd_config.", LINUX_GUEST_USER)
 
         # Validate config before restarting
         result = run_command(
@@ -734,11 +858,13 @@ def linux_configure_ssh_jail():
         )
         if result.returncode != 0:
             logger.error("sshd_config validation failed: %s", result.stderr.strip())
-            # Restore original config
-            with open(sshd_config, "w") as f:
-                f.write(existing)
-            logger.info("Restored original sshd_config.")
-            raise RuntimeError("sshd_config validation failed after adding SSH jail block.")
+            if os.path.exists(backup_path):
+                with open(backup_path, "r") as f:
+                    original = f.read()
+                with open(sshd_config, "w") as f:
+                    f.write(original)
+                logger.info("Restored original sshd_config from backup.")
+            raise RuntimeError("sshd_config validation failed after adding SSH config block.")
 
         run_command(
             "systemctl restart sshd || systemctl restart ssh",
