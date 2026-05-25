@@ -112,10 +112,18 @@ def update_ssh_config(host, port, username="wizguest", alias="WizIsland"):
             with open(config_path, "r") as f:
                 existing = f.read()
 
-        # Remove any previous WizIsland entry (marker + Host line + indented config)
+        # Remove ALL previous WizIsland entries — with or without the marker
+        # First: remove entries with the marker comment
         existing = re.sub(
             r"\n?# --- Wiz Island Connection ---\n"
             r"Host [^\n]*\n"
+            r"(?:[ \t]+[^\n]*\n)*",
+            "",
+            existing,
+        )
+        # Second: remove any bare "Host WizIsland" blocks (from older versions)
+        existing = re.sub(
+            r"\n?Host " + re.escape(alias) + r"\s*\n"
             r"(?:[ \t]+[^\n]*\n)*",
             "",
             existing,
@@ -153,16 +161,27 @@ def remove_ssh_config(alias="WizIsland"):
             existing = f.read()
 
         marker_start = "# --- Wiz Island Connection ---"
-        if marker_start not in existing:
+        has_marker = marker_start in existing
+        has_host = re.search(r"Host\s+" + re.escape(alias) + r"\s", existing)
+
+        if not has_marker and not has_host:
             print(f"  No '{alias}' entry found in SSH config.")
             return
 
+        # Remove entries with marker
         cleaned = re.sub(
             r"\n?# --- Wiz Island Connection ---\n"
             r"Host [^\n]*\n"
             r"(?:[ \t]+[^\n]*\n)*",
             "",
             existing,
+        )
+        # Remove bare Host entries (from older versions)
+        cleaned = re.sub(
+            r"\n?Host " + re.escape(alias) + r"\s*\n"
+            r"(?:[ \t]+[^\n]*\n)*",
+            "",
+            cleaned,
         )
 
         with open(config_path, "w") as f:
