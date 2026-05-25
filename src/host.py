@@ -73,6 +73,46 @@ def prompt_storage_quota():
             return None
 
 
+def _ensure_tunnel_key():
+    """Generate a temporary SSH key for Pinggy if one doesn't exist.
+
+    Pinggy accepts any SSH key — this avoids interactive password prompts.
+    The key is stored alongside the project so it persists between sessions.
+    """
+    script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    key_path = os.path.join(script_dir, ".pinggy_key")
+
+    if os.path.exists(key_path):
+        return key_path
+
+    try:
+        subprocess.run(
+            ["ssh-keygen", "-t", "ed25519", "-f", key_path, "-N", "", "-q"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        logger.info("Generated Pinggy tunnel key at %s", key_path)
+    except FileNotFoundError:
+        logger.warning("ssh-keygen not found, trying RSA fallback.")
+        try:
+            subprocess.run(
+                ["ssh-keygen", "-t", "rsa", "-b", "2048", "-f", key_path,
+                 "-N", "", "-q"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as exc:
+            logger.error("Cannot generate SSH key: %s", exc)
+            return None
+    except Exception as exc:
+        logger.error("Cannot generate SSH key: %s", exc)
+        return None
+
+    return key_path
+
+
 def start_pinggy_tunnel():
     """Start a Pinggy TCP tunnel on port 22 and parse the public URL.
 
@@ -84,20 +124,29 @@ def start_pinggy_tunnel():
     print("\n  Starting Pinggy TCP tunnel on port 22...")
     print("  (Free tunnel via pinggy.io — no account required)")
 
+    # Generate a key so SSH authenticates without a password prompt
+    key_path = _ensure_tunnel_key()
+
     ssh_cmd = [
-        "ssh", "-p", "443",
+        "ssh",
+        "-p", "443",
         "-R", "0:localhost:22",
+        "-T",
         "-o", "StrictHostKeyChecking=no",
         "-o", "ServerAliveInterval=60",
-        "tcp@a.pinggy.io",
     ]
+
+    if key_path and os.path.exists(key_path):
+        ssh_cmd += ["-i", key_path]
+
+    ssh_cmd.append("tcp@a.pinggy.io")
 
     try:
         _tunnel_process = subprocess.Popen(
             ssh_cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            stdin=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
             text=True,
         )
     except FileNotFoundError:
@@ -113,13 +162,6 @@ def start_pinggy_tunnel():
         logger.error("Failed to start Pinggy tunnel: %s", exc)
         print(f"  [ERROR] Failed to start tunnel: {exc}")
         return None
-
-    # Pinggy may prompt for a password via SSH — send an empty response
-    try:
-        _tunnel_process.stdin.write("\n")
-        _tunnel_process.stdin.flush()
-    except (BrokenPipeError, OSError):
-        pass
 
     url_pattern = re.compile(r"(tcp://[\w\.\-]+:\d+)")
     collected_output = []
@@ -150,7 +192,6 @@ def start_pinggy_tunnel():
     checked_idx = 0
 
     while time.time() < deadline:
-        # Check new output lines for the tunnel URL
         while checked_idx < len(collected_output):
             line = collected_output[checked_idx]
             checked_idx += 1
@@ -163,7 +204,6 @@ def start_pinggy_tunnel():
 
         if _tunnel_process.poll() is not None:
             reader.join(timeout=3)
-            # Check any remaining output
             while checked_idx < len(collected_output):
                 line = collected_output[checked_idx]
                 checked_idx += 1
