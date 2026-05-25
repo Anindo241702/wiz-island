@@ -16,7 +16,7 @@ if %errorlevel% neq 0 (
 )
 
 echo ============================================================
-echo   WIZ ISLAND - Windows Bootstrapper  v1.1.0
+echo   WIZ ISLAND - Windows Bootstrapper  v1.2.0
 echo ============================================================
 echo.
 echo   Detected: Windows %OS%

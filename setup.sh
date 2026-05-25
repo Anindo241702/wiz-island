@@ -27,7 +27,7 @@ log_error() {
 }
 
 echo -e "${CYAN}============================================================${NC}"
-echo -e "${CYAN}  WIZ ISLAND - Linux Bootstrapper  v1.1.0${NC}"
+echo -e "${CYAN}  WIZ ISLAND - Linux Bootstrapper  v1.2.0${NC}"
 echo -e "${CYAN}============================================================${NC}"
 echo
 echo -e "  Detected: $(uname -s) $(uname -r)"

@@ -439,8 +439,7 @@ def windows_configure_ssh_jail():
         f"\n# --- Wiz Island SSH Jail ---\n"
         f"Match User {WINDOWS_GUEST_USER}\n"
         f"    PasswordAuthentication yes\n"
-        f"    AllowTcpForwarding no\n"
-        f"    PermitTunnel no\n"
+        f"    AllowTcpForwarding yes\n"
     )
 
     try:
@@ -557,21 +556,49 @@ def windows_configure_firewall():
         logger.warning("Could not add firewall rule (SSH may still work): %s", exc)
 
 
+def _windows_set_default_shell():
+    """Set the default SSH shell to PowerShell instead of cmd.exe.
+
+    This allows VS Code and terminal users to have PowerShell, and they
+    can still launch cmd, git bash, or any other shell from there.
+    """
+    ps_path = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+    if not os.path.exists(ps_path):
+        logger.info("PowerShell not found at default path, skipping shell config.")
+        return
+
+    reg_key = (
+        r"HKLM\SOFTWARE\OpenSSH"
+    )
+    try:
+        run_command(
+            f'reg add "{reg_key}" /v DefaultShell /t REG_SZ '
+            f'/d "{ps_path}" /f',
+            description="set default SSH shell to PowerShell",
+        )
+        logger.info("Default SSH shell set to PowerShell.")
+    except Exception as exc:
+        logger.warning("Could not set default SSH shell: %s", exc)
+
+
 def windows_setup_storage(size_gb):
     """Full Windows storage setup pipeline."""
-    print(f"  [1/5] Creating {size_gb} GB VHDX virtual disk...")
+    print(f"  [1/6] Creating {size_gb} GB VHDX virtual disk...")
     windows_create_vhdx(size_gb)
 
-    print(f"  [2/5] Creating guest user '{WINDOWS_GUEST_USER}'...")
+    print(f"  [2/6] Creating guest user '{WINDOWS_GUEST_USER}'...")
     windows_create_guest_user()
 
-    print(f"  [3/5] Setting permissions on {WINDOWS_MOUNT_DRIVE}...")
+    print(f"  [3/6] Setting permissions on {WINDOWS_MOUNT_DRIVE}...")
     windows_set_permissions()
 
-    print("  [4/5] Configuring SSH jail...")
+    print("  [4/6] Configuring SSH jail...")
     windows_configure_ssh_jail()
 
-    print("  [5/5] Configuring firewall...")
+    print("  [5/6] Setting default shell to PowerShell...")
+    _windows_set_default_shell()
+
+    print("  [6/6] Configuring firewall...")
     windows_configure_firewall()
 
     print("  Storage setup complete.")
@@ -817,7 +844,7 @@ def linux_set_permissions():
             description="chown workspace directory",
         )
         run_command(
-            f"chmod 700 \"{workspace}\"",
+            f"chmod 755 \"{workspace}\"",
             description="chmod workspace directory",
         )
         logger.info("Permissions set on %s for %s.", LINUX_MOUNT_DIR, LINUX_GUEST_USER)
@@ -864,9 +891,8 @@ def linux_configure_ssh_jail():
         f"\n\n# --- Wiz Island SSH Jail ---\n"
         f"Match User {LINUX_GUEST_USER}\n"
         f"    PasswordAuthentication yes\n"
-        f"    AllowTcpForwarding no\n"
-        f"    X11Forwarding no\n"
-        f"    PermitTunnel no\n"
+        f"    AllowTcpForwarding yes\n"
+        f"    X11Forwarding yes\n"
     )
 
     try:

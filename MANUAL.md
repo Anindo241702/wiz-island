@@ -1,6 +1,6 @@
 # Wiz Island - User Manual
 
-**Version 1.1.0**
+**Version 1.2.0**
 
 A comprehensive guide for new users to set up, configure, and use Wiz Island for peer-to-peer SSH tunneling.
 
@@ -184,7 +184,16 @@ After installation, the CLI presents an interactive menu:
 
 Select **[1] HOST MODE** from the main menu. The setup process has several steps:
 
-#### Step 1: Storage Quota
+#### Step 1: Guest Username & Max Coders
+
+```
+  Guest username (press Enter for 'WizGuest'): devteam
+  Max coders allowed (press Enter for unlimited): 5
+```
+
+You can set a custom guest username or press Enter to keep the default. You can also set how many coders can connect simultaneously.
+
+#### Step 2: Storage Quota
 
 ```
   Enter storage quota in GB (e.g., 10): 10
@@ -198,11 +207,11 @@ Enter how much disk space to allocate for the guest sandbox. This creates an iso
 
 If a previous setup is detected, you'll be asked whether to reuse it or start fresh.
 
-#### Step 2: Tunnel Creation
+#### Step 3: Tunnel Creation
 
 The application automatically starts a Pinggy TCP tunnel on port 22 (SSH) via SSH. No account or token is needed. This typically takes 5-10 seconds.
 
-#### Step 3: Dashboard
+#### Step 4: Dashboard
 
 Once the tunnel is established, a real-time dashboard appears:
 
@@ -360,12 +369,25 @@ VS Code's **Remote - SSH** extension provides the best experience for developmen
 ### Working Remotely
 
 Once connected:
-- The **Explorer** panel shows the Host's sandbox filesystem
-- The **Terminal** runs on the Host machine with full shell access
+- The **Explorer** panel shows the Host's sandbox filesystem — drag & drop files to upload
+- The **Terminal** runs on the Host machine — PowerShell, Git Bash, or cmd (Windows), bash (Linux)
 - You have full access to the Host's CPU, RAM, GPU, and storage for builds and tasks
-- File editing happens locally; saves are synced to the Host
+- File editing happens locally; saves are synced to the Host instantly
 - You can install VS Code extensions on the remote side for full IDE features
 - Python, Node.js, compilers, and other tools installed on the Host are available
+- Create virtual environments, install packages, run dev servers
+
+### Port Forwarding (Dev Servers)
+
+When you run a dev server in the VS Code terminal (e.g., `npm run dev`, `flask run`), VS Code automatically detects the open port and offers to forward it. Click "Open in Browser" to view the app in **your local browser**.
+
+You can also manually forward ports via the **Ports** panel in VS Code (`Ctrl+Shift+P` → "Ports: Focus on Ports View").
+
+Manual port forwarding from terminal:
+```bash
+# Forward host's port 3000 to your local port 3000
+ssh -L 3000:localhost:3000 WizIsland
+```
 
 ---
 
@@ -622,4 +644,4 @@ After running Terminate:
 
 ---
 
-*Wiz Island v1.1.0 - Serverless P2P SSH Tunneling Tool*
+*Wiz Island v1.2.0 - Serverless P2P SSH Tunneling Tool*
