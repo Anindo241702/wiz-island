@@ -96,7 +96,7 @@ def start_pinggy_tunnel():
             ssh_cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE,
             text=True,
         )
     except FileNotFoundError:
@@ -113,20 +113,72 @@ def start_pinggy_tunnel():
         print(f"  [ERROR] Failed to start tunnel: {exc}")
         return None
 
+    # Pinggy may prompt for a password via SSH — send an empty response
+    try:
+        _tunnel_process.stdin.write("\n")
+        _tunnel_process.stdin.flush()
+    except (BrokenPipeError, OSError):
+        pass
+
     url_pattern = re.compile(r"(tcp://[\w\.\-]+:\d+)")
-    deadline = time.time() + 30
+    collected_output = []
+
+    def _read_output():
+        """Read stdout character-by-character to handle partial lines."""
+        buf = ""
+        try:
+            while True:
+                ch = _tunnel_process.stdout.read(1)
+                if not ch:
+                    if buf:
+                        collected_output.append(buf)
+                    break
+                buf += ch
+                if ch == "\n":
+                    collected_output.append(buf.strip())
+                    buf = ""
+        except Exception:
+            if buf:
+                collected_output.append(buf)
+
+    reader = threading.Thread(target=_read_output, daemon=True)
+    reader.start()
 
     print("  Waiting for tunnel to establish...")
+    deadline = time.time() + 30
+    checked_idx = 0
 
     while time.time() < deadline:
+        # Check new output lines for the tunnel URL
+        while checked_idx < len(collected_output):
+            line = collected_output[checked_idx]
+            checked_idx += 1
+            logger.debug("pinggy: %s", line)
+            match = url_pattern.search(line)
+            if match:
+                _tunnel_url = match.group(1)
+                logger.info("Pinggy tunnel established: %s", _tunnel_url)
+                return _tunnel_url
+
         if _tunnel_process.poll() is not None:
-            remaining = _tunnel_process.stdout.read() if _tunnel_process.stdout else ""
-            logger.error("Pinggy tunnel exited. Output: %s", remaining)
+            reader.join(timeout=3)
+            # Check any remaining output
+            while checked_idx < len(collected_output):
+                line = collected_output[checked_idx]
+                checked_idx += 1
+                match = url_pattern.search(line)
+                if match:
+                    _tunnel_url = match.group(1)
+                    logger.info("Pinggy tunnel established: %s", _tunnel_url)
+                    return _tunnel_url
+
+            all_output = "\n".join(collected_output)
+            logger.error("Pinggy tunnel exited. Output: %s", all_output)
             print("  [ERROR] Tunnel process exited unexpectedly.")
-            if remaining.strip():
+            if all_output.strip():
                 print()
                 print("  --- Tunnel Output ---")
-                for out_line in remaining.strip().split("\n"):
+                for out_line in all_output.strip().split("\n"):
                     out_line = out_line.strip()
                     if out_line:
                         print(f"  {out_line}")
@@ -138,18 +190,7 @@ def start_pinggy_tunnel():
             print("    - Firewall blocking outbound SSH on port 443")
             return None
 
-        line = _tunnel_process.stdout.readline()
-        if not line:
-            time.sleep(0.5)
-            continue
-
-        line_stripped = line.strip()
-        logger.debug("pinggy: %s", line_stripped)
-        match = url_pattern.search(line)
-        if match:
-            _tunnel_url = match.group(1)
-            logger.info("Pinggy tunnel established: %s", _tunnel_url)
-            return _tunnel_url
+        time.sleep(0.5)
 
     print("  [ERROR] Could not detect tunnel URL within 30 seconds.")
     print("  Please check your internet connection.")
@@ -476,6 +517,27 @@ def run_host_mode():
     print("\n  ============================================================")
     print("   WIZ ISLAND - HOST MODE SETUP")
     print("  ============================================================")
+
+    # Step 0: Optional custom guest username
+    default_user = ("WizGuest" if platform.system() == "Windows" else "wizguest")
+    try:
+        custom_user = input(
+            f"\n  Guest username (press Enter for '{default_user}'): "
+        ).strip()
+        if custom_user:
+            if not custom_user.isalnum():
+                print("  [WARNING] Username should be alphanumeric. Using default.")
+                custom_user = ""
+            elif len(custom_user) > 20:
+                print("  [WARNING] Username too long. Using default.")
+                custom_user = ""
+        if custom_user:
+            storage.set_guest_username(custom_user)
+            print(f"  Guest username set to: {custom_user}")
+        else:
+            print(f"  Using default: {default_user}")
+    except (EOFError, KeyboardInterrupt):
+        print(f"\n  Using default: {default_user}")
 
     # Step 1: Storage quota
     size_gb = prompt_storage_quota()

@@ -30,6 +30,17 @@ LINUX_GUEST_USER = "wizguest"
 LINUX_MOUNT_DIR = "/mnt/wizsandbox"
 LINUX_IMAGE_PATH = "/opt/wiz_island/sandbox.img"
 
+
+def set_guest_username(username):
+    """Override the default guest username for this session."""
+    global WINDOWS_GUEST_USER, LINUX_GUEST_USER
+    plat = platform.system()
+    if plat == "Windows":
+        WINDOWS_GUEST_USER = username
+    else:
+        LINUX_GUEST_USER = username.lower()
+    logger.info("Guest username set to: %s", username)
+
 # Dynamically generated passwords (set during setup, persisted in memory)
 _guest_password = None
 
