@@ -743,35 +743,100 @@ def _windows_set_default_shell():
     except Exception as exc:
         logger.warning("Could not set default SSH shell: %s", exc)
 
-    # Create a system-wide PowerShell profile that:
-    # 1. Adds discovered tool paths to the guest's PATH
-    # 2. Sets the working directory to X:\
+    # Create a system-wide PowerShell profile that dynamically discovers
+    # dev tools and adds them to PATH at login time. This runs when the
+    # guest connects via SSH/VS Code, not at setup time.
     profile_dir = r"C:\Windows\System32\WindowsPowerShell\v1.0"
     profile_path = os.path.join(profile_dir, "profile.ps1")
     sandbox_dir = WINDOWS_MOUNT_DRIVE + "\\"
 
-    # Scan for installed dev tools
-    tool_paths = _windows_scan_tool_paths()
-    path_lines = ""
-    if tool_paths:
-        escaped = ";".join(tool_paths)
-        path_lines = (
-            f"    # Add developer tools to PATH\n"
-            f"    $env:Path = '{escaped};' + $env:Path\n"
-        )
-        for p in tool_paths:
-            print(f"    + Found tool: {p}")
-
-    profile_block = (
-        f"\n# --- Wiz Island Guest Environment ---\n"
-        f"if ($env:USERNAME -eq '{WINDOWS_GUEST_USER}') {{\n"
-        f"{path_lines}"
-        f"    if (Test-Path '{sandbox_dir}') {{\n"
-        f"        Set-Location '{sandbox_dir}'\n"
-        f"    }}\n"
-        f"}}\n"
-        f"# --- End Wiz Island ---\n"
+    # The profile script itself discovers tools dynamically each login
+    profile_block = f"""
+# --- Wiz Island Guest Environment ---
+if ($env:USERNAME -eq '{WINDOWS_GUEST_USER}') {{
+    # Dynamically discover dev tools and add to PATH
+    $toolDirs = @(
+        # Git
+        'C:\\Program Files\\Git\\cmd',
+        'C:\\Program Files\\Git\\bin',
+        'C:\\Program Files\\Git\\usr\\bin',
+        # Node.js
+        'C:\\Program Files\\nodejs',
+        # Go
+        'C:\\Program Files\\Go\\bin',
+        # Java
+        'C:\\Program Files\\Java\\jdk-21\\bin',
+        'C:\\Program Files\\Java\\jdk-17\\bin',
+        # VS Code
+        'C:\\Program Files\\Microsoft VS Code\\bin'
     )
+
+    # Scan all user profiles for Python, Conda, npm, Rust, CUDA
+    Get-ChildItem 'C:\\Users' -Directory -ErrorAction SilentlyContinue | ForEach-Object {{
+        $u = $_.FullName
+        # Python (multiple install locations)
+        foreach ($pyBase in @(
+            (Join-Path $u 'AppData\\Local\\Python'),
+            (Join-Path $u 'AppData\\Local\\Programs\\Python')
+        )) {{
+            if (Test-Path $pyBase) {{
+                $toolDirs += $pyBase
+                if (Test-Path (Join-Path $pyBase 'bin')) {{ $toolDirs += Join-Path $pyBase 'bin' }}
+                if (Test-Path (Join-Path $pyBase 'Scripts')) {{ $toolDirs += Join-Path $pyBase 'Scripts' }}
+                Get-ChildItem $pyBase -Directory -ErrorAction SilentlyContinue | ForEach-Object {{
+                    $toolDirs += $_.FullName
+                    if (Test-Path (Join-Path $_.FullName 'Scripts')) {{ $toolDirs += Join-Path $_.FullName 'Scripts' }}
+                }}
+            }}
+        }}
+        # System Python installs
+        foreach ($pyRoot in @('C:\\Python314','C:\\Python313','C:\\Python312','C:\\Python311','C:\\Python310','C:\\Python39')) {{
+            if (Test-Path $pyRoot) {{ $toolDirs += $pyRoot; $toolDirs += "$pyRoot\\Scripts" }}
+        }}
+        # Conda / Miniconda / Anaconda
+        foreach ($condaBase in @(
+            (Join-Path $u 'miniconda3'),
+            (Join-Path $u 'Anaconda3'),
+            'C:\\ProgramData\\miniconda3',
+            'C:\\ProgramData\\Anaconda3'
+        )) {{
+            if (Test-Path $condaBase) {{
+                $toolDirs += $condaBase
+                if (Test-Path (Join-Path $condaBase 'Scripts')) {{ $toolDirs += Join-Path $condaBase 'Scripts' }}
+                if (Test-Path (Join-Path $condaBase 'condabin')) {{ $toolDirs += Join-Path $condaBase 'condabin' }}
+            }}
+        }}
+        # npm global
+        $npmDir = Join-Path $u 'AppData\\Roaming\\npm'
+        if (Test-Path $npmDir) {{ $toolDirs += $npmDir }}
+        # Rust
+        $cargoDir = Join-Path $u '.cargo\\bin'
+        if (Test-Path $cargoDir) {{ $toolDirs += $cargoDir }}
+        # WindowsApps (Python Store)
+        $waDir = Join-Path $u 'AppData\\Local\\Microsoft\\WindowsApps'
+        if (Test-Path $waDir) {{ $toolDirs += $waDir }}
+    }}
+
+    # CUDA
+    foreach ($cudaVer in @('v12.6','v12.0','v11.8')) {{
+        $cudaPath = "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\$cudaVer\\bin"
+        if (Test-Path $cudaPath) {{ $toolDirs += $cudaPath }}
+    }}
+
+    # Add discovered paths to env
+    foreach ($d in $toolDirs) {{
+        if ((Test-Path $d) -and ($env:Path -notlike "*$d*")) {{
+            $env:Path = "$d;" + $env:Path
+        }}
+    }}
+
+    # Set working directory to sandbox
+    if (Test-Path '{sandbox_dir}') {{
+        Set-Location '{sandbox_dir}'
+    }}
+}}
+# --- End Wiz Island ---
+"""
 
     try:
         existing = ""
