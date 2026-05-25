@@ -349,27 +349,44 @@ def _move_cursor_home():
         sys.stdout.flush()
 
 
+def _reconnect_tunnel():
+    """Attempt to restart the Pinggy tunnel and return the new URL."""
+    global _tunnel_process, _tunnel_url
+    logger.info("Attempting tunnel reconnect...")
+    with _lock:
+        if _tunnel_process:
+            try:
+                _tunnel_process.terminate()
+                _tunnel_process.wait(timeout=5)
+            except Exception:
+                try:
+                    _tunnel_process.kill()
+                except Exception:
+                    pass
+            _tunnel_process = None
+            _tunnel_url = None
+
+    new_url = start_pinggy_tunnel()
+    if new_url:
+        logger.info("Tunnel reconnected: %s", new_url)
+    else:
+        logger.error("Tunnel reconnect failed.")
+    return new_url
+
+
 def render_dashboard():
     """Render the real-time dashboard to the terminal."""
-    global _running, _start_time
+    global _running, _start_time, _tunnel_url
 
     mount_path = storage.get_mount_path()
     guest_user, guest_pass = storage.get_guest_credentials()
-
-    # Parse host and port from tunnel URL
-    tunnel_display = _tunnel_url or "N/A"
-    ssh_host = "N/A"
-    ssh_port = "N/A"
-    if _tunnel_url:
-        parts = _tunnel_url.replace("tcp://", "").split(":")
-        if len(parts) == 2:
-            ssh_host = parts[0]
-            ssh_port = parts[1]
 
     _running = True
     _start_time = time.time()
     prev_net = get_network_io()
     prev_time = time.time()
+    _reconnect_count = 0
+    _tunnel_status = "CONNECTED"
 
     # Initial clear, then use cursor repositioning for flicker-free updates
     clear_screen()
@@ -379,6 +396,32 @@ def render_dashboard():
 
     while _running:
         try:
+            # Check tunnel health and auto-reconnect if needed
+            if _tunnel_process and _tunnel_process.poll() is not None:
+                _tunnel_status = "RECONNECTING..."
+                logger.warning("Tunnel process died, auto-reconnecting...")
+                clear_screen()
+                new_url = _reconnect_tunnel()
+                if new_url:
+                    _tunnel_status = "CONNECTED (reconnected)"
+                    _reconnect_count += 1
+                    clear_screen()
+                else:
+                    _tunnel_status = "DISCONNECTED - reconnect failed"
+                    # Wait before retrying
+                    time.sleep(5)
+                    continue
+
+            # Parse current tunnel URL
+            tunnel_display = _tunnel_url or "N/A"
+            ssh_host = "N/A"
+            ssh_port = "N/A"
+            if _tunnel_url:
+                parts = _tunnel_url.replace("tcp://", "").split(":")
+                if len(parts) == 2:
+                    ssh_host = parts[0]
+                    ssh_port = parts[1]
+
             _move_cursor_home()
 
             cpu_percent = psutil.cpu_percent(interval=0.5)
@@ -403,6 +446,11 @@ def render_dashboard():
             else:
                 conn_display = str(connections)
 
+            # Tunnel status display
+            tunnel_stat = _tunnel_status
+            if _reconnect_count > 0:
+                tunnel_stat += f" (reconnects: {_reconnect_count})"
+
             # Build the dashboard — pad each line to overwrite previous content
             def pad(s):
                 return s.ljust(dash_width)
@@ -413,6 +461,7 @@ def render_dashboard():
                 pad("   WIZ ISLAND - HOST DASHBOARD"),
                 pad("  ============================================================"),
                 pad(""),
+                pad(f"   TUNNEL STATUS    : {tunnel_stat}"),
                 pad(f"   TUNNEL URL       : {tunnel_display}"),
                 pad(f"   SSH Command      : ssh {guest_user}@{ssh_host} -p {ssh_port}"),
                 pad(f"   Guest Password   : {guest_pass}"),
@@ -451,8 +500,8 @@ def render_dashboard():
                 pad(f"   Total Received   : {_format_bytes(curr_net['bytes_recv'])}"),
                 pad(""),
                 pad("  ============================================================"),
-                pad("   NOTE: Tunnel URL changes every session. Coders must"),
-                pad("   re-run User Mode with the new URL to reconnect."),
+                pad("   Auto-reconnect is ON. Tunnel restarts automatically"),
+                pad("   if it expires. Coders must re-run User Mode after."),
                 pad("  ============================================================"),
                 pad("   Press 'x' then Enter to activate PANIC BUTTON (Ctrl+C also works)"),
                 pad("  ============================================================"),
