@@ -127,11 +127,42 @@ def start_ngrok_tunnel():
     url_pattern = re.compile(r"url=(tcp://[\w\.\-]+:\d+)")
     deadline = time.time() + 20
 
+    collected_output = []
     while time.time() < deadline:
         if _ngrok_process.poll() is not None:
             stdout_remaining = _ngrok_process.stdout.read() if _ngrok_process.stdout else ""
-            logger.error("Ngrok process exited unexpectedly. Output: %s", stdout_remaining)
-            print("  [ERROR] Ngrok exited unexpectedly. Check your AuthToken and network.")
+            all_output = "\n".join(collected_output)
+            if stdout_remaining:
+                all_output += "\n" + stdout_remaining
+            logger.error("Ngrok process exited unexpectedly. Output: %s", all_output)
+            print("  [ERROR] Ngrok exited unexpectedly.")
+            # Show the actual error to the user
+            if all_output.strip():
+                print()
+                print("  --- Ngrok Output ---")
+                for out_line in all_output.strip().split("\n"):
+                    out_line = out_line.strip()
+                    if out_line:
+                        print(f"  {out_line}")
+                print("  ---------------------")
+                print()
+            # Provide helpful suggestions based on common errors
+            lower_output = all_output.lower()
+            if "invalid" in lower_output and "authtoken" in lower_output:
+                print("  Your AuthToken appears to be invalid.")
+                print("  Get a new one from: https://dashboard.ngrok.com/get-started/your-authtoken")
+            elif "err_ngrok_108" in lower_output or "already running" in lower_output:
+                print("  Another Ngrok tunnel is already running (free tier allows only 1).")
+                print("  Close any other Ngrok sessions first.")
+            elif "upgrade" in lower_output or "paid" in lower_output:
+                print("  Your Ngrok plan may not support TCP tunnels.")
+                print("  Check your account at: https://dashboard.ngrok.com")
+            else:
+                print("  Possible causes:")
+                print("    - Invalid or expired AuthToken")
+                print("    - Another Ngrok tunnel already running (free tier: 1 max)")
+                print("    - Network/firewall blocking Ngrok")
+                print("  Get your AuthToken: https://dashboard.ngrok.com/get-started/your-authtoken")
             return None
 
         line = _ngrok_process.stdout.readline()
@@ -139,7 +170,9 @@ def start_ngrok_tunnel():
             time.sleep(0.1)
             continue
 
-        logger.debug("ngrok: %s", line.strip())
+        line_stripped = line.strip()
+        collected_output.append(line_stripped)
+        logger.debug("ngrok: %s", line_stripped)
         match = url_pattern.search(line)
         if match:
             _tunnel_url = match.group(1)
