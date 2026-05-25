@@ -183,25 +183,60 @@ def windows_create_vhdx(size_gb):
 
     if os.path.exists(WINDOWS_VHDX_PATH):
         logger.warning("VHDX already exists at %s. Reusing existing disk.", WINDOWS_VHDX_PATH)
-        # Attempt to attach the existing VHDX
+
+        # If the drive letter is already accessible, nothing to do
+        if os.path.isdir(WINDOWS_MOUNT_DRIVE + "\\"):
+            logger.info("Drive %s is already accessible.", WINDOWS_MOUNT_DRIVE)
+            return
+
         script_path = os.path.join(vhdx_dir, "diskpart_attach.txt")
+        drive_letter = WINDOWS_MOUNT_DRIVE[0]
+
+        # Step 1: Try full attach + assign (works when VHDX is not attached)
         try:
             with open(script_path, "w") as f:
                 f.write(
                     f"select vdisk file=\"{WINDOWS_VHDX_PATH}\"\n"
                     "attach vdisk\n"
-                    f"select volume X\n"
-                    f"assign letter={WINDOWS_MOUNT_DRIVE[0]}\n"
+                    "select partition 1\n"
+                    f"assign letter={drive_letter}\n"
                     "exit\n"
                 )
-            run_command(f"diskpart /s \"{script_path}\"", description="diskpart attach existing VHDX")
+            run_command(
+                f"diskpart /s \"{script_path}\"",
+                description="diskpart attach and assign",
+            )
         except Exception as exc:
-            logger.warning("Could not reattach existing VHDX: %s", exc)
+            logger.warning("Full attach failed (disk may already be attached): %s", exc)
+            # Step 2: VHDX already attached — just assign the drive letter
+            try:
+                with open(script_path, "w") as f:
+                    f.write(
+                        f"select vdisk file=\"{WINDOWS_VHDX_PATH}\"\n"
+                        "select partition 1\n"
+                        f"assign letter={drive_letter}\n"
+                        "exit\n"
+                    )
+                run_command(
+                    f"diskpart /s \"{script_path}\"",
+                    description="diskpart assign drive letter",
+                )
+            except Exception as exc2:
+                logger.error("Could not assign drive letter: %s", exc2)
         finally:
             try:
                 os.remove(script_path)
             except OSError:
                 pass
+
+        # Verify the drive is now accessible
+        time.sleep(1)
+        if not os.path.isdir(WINDOWS_MOUNT_DRIVE + "\\"):
+            raise RuntimeError(
+                f"Drive {WINDOWS_MOUNT_DRIVE} is not accessible after reattach. "
+                f"Try running Terminate first, then re-run Host Mode."
+            )
+        logger.info("Drive %s is now accessible.", WINDOWS_MOUNT_DRIVE)
         return
 
     size_mb = size_gb * 1024
