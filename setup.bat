@@ -5,6 +5,8 @@ REM  This bootstrapper checks for admin privileges, installs
 REM  dependencies via winget, and launches the Python CLI.
 REM ============================================================
 
+title Wiz Island - Setup
+
 :: --- Check for Administrative Privileges ---
 net session >nul 2>&1
 if %errorlevel% neq 0 (
@@ -14,34 +16,53 @@ if %errorlevel% neq 0 (
 )
 
 echo ============================================================
-echo   WIZ ISLAND - Windows Bootstrapper
+echo   WIZ ISLAND - Windows Bootstrapper  v1.0.0
 echo ============================================================
+echo.
+echo   Detected: Windows %OS%
+echo   Running as: Administrator
+echo   Date: %date% %time%
 echo.
 
 :: --- Install Python if missing ---
+echo [WizIsland] Checking for Python...
 where python >nul 2>&1
 if %errorlevel% neq 0 (
     echo [WizIsland] Python not found. Installing via winget...
     winget install -e --id Python.Python.3.11 --accept-source-agreements --accept-package-agreements
     if %errorlevel% neq 0 (
-        echo [ERROR] Failed to install Python. Please install manually.
+        echo [ERROR] Failed to install Python via winget.
+        echo [INFO]  Please install Python 3.10+ manually from https://python.org
         pause
         exit /b 1
     )
     echo [WizIsland] Python installed successfully.
     :: Refresh PATH for the current session
     set "PATH=%LOCALAPPDATA%\Programs\Python\Python311;%LOCALAPPDATA%\Programs\Python\Python311\Scripts;%PATH%"
+    :: Also try Python312 path
+    set "PATH=%LOCALAPPDATA%\Programs\Python\Python312;%LOCALAPPDATA%\Programs\Python\Python312\Scripts;%PATH%"
 ) else (
-    echo [WizIsland] Python is already installed.
+    for /f "tokens=*" %%i in ('python --version 2^>^&1') do echo [WizIsland] %%i is already installed.
+)
+
+:: --- Verify Python is accessible ---
+where python >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [ERROR] Python is still not found in PATH after installation.
+    echo [INFO]  Please restart your terminal and try again, or add Python to PATH manually.
+    pause
+    exit /b 1
 )
 
 :: --- Install OpenSSH Server if missing ---
+echo [WizIsland] Checking for OpenSSH Server...
 sc query sshd >nul 2>&1
 if %errorlevel% neq 0 (
     echo [WizIsland] OpenSSH Server not found. Installing...
     powershell -Command "Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0"
     if %errorlevel% neq 0 (
         echo [ERROR] Failed to install OpenSSH Server.
+        echo [INFO]  You can install it manually via Settings ^> Apps ^> Optional Features
         pause
         exit /b 1
     )
@@ -55,17 +76,36 @@ echo [WizIsland] Configuring OpenSSH Server service...
 sc config sshd start= auto >nul 2>&1
 net start sshd >nul 2>&1
 
+:: --- Configure Windows Firewall for SSH ---
+echo [WizIsland] Checking firewall rules...
+netsh advfirewall firewall show rule name="WizIsland SSH" >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [WizIsland] Adding firewall rule for SSH port 22...
+    netsh advfirewall firewall add rule name="WizIsland SSH" dir=in action=allow protocol=TCP localport=22 profile=any enable=yes >nul 2>&1
+    if %errorlevel% neq 0 (
+        echo [WARNING] Could not add firewall rule. SSH may not be reachable externally.
+    ) else (
+        echo [WizIsland] Firewall rule added successfully.
+    )
+) else (
+    echo [WizIsland] Firewall rule already configured.
+)
+
 :: --- Install Ngrok if missing ---
+echo [WizIsland] Checking for Ngrok...
 where ngrok >nul 2>&1
 if %errorlevel% neq 0 (
     echo [WizIsland] Ngrok not found. Installing via winget...
     winget install -e --id Ngrok.Ngrok --accept-source-agreements --accept-package-agreements
     if %errorlevel% neq 0 (
-        echo [ERROR] Failed to install Ngrok. Please install manually.
+        echo [ERROR] Failed to install Ngrok via winget.
+        echo [INFO]  Please install Ngrok manually from https://ngrok.com/download
         pause
         exit /b 1
     )
     echo [WizIsland] Ngrok installed successfully.
+    :: Add common Ngrok install paths
+    set "PATH=%LOCALAPPDATA%\ngrok;%ProgramFiles%\ngrok;%PATH%"
 ) else (
     echo [WizIsland] Ngrok is already installed.
 )
@@ -76,13 +116,15 @@ python -m pip install --upgrade pip >nul 2>&1
 python -m pip install -r "%~dp0requirements.txt"
 if %errorlevel% neq 0 (
     echo [ERROR] Failed to install Python dependencies.
+    echo [INFO]  Make sure pip is working: python -m pip --version
     pause
     exit /b 1
 )
 
 echo.
 echo ============================================================
-echo   All dependencies installed. Launching Wiz Island...
+echo   All dependencies installed successfully!
+echo   Launching Wiz Island...
 echo ============================================================
 echo.
 

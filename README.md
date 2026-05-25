@@ -1,13 +1,31 @@
 # Wiz Island
 
-**Serverless Peer-to-Peer SSH Tunneling Tool**
+**Serverless Peer-to-Peer SSH Tunneling Tool** | v1.0.0
 
 Wiz Island is a CLI tool written in Python that allows a client to connect securely to a Host machine's CPU/GPU/RAM/Storage over an SSH tunnel via Ngrok. The tool configures everything automatically on both Windows and Debian-based Linux (Ubuntu/Kali).
 
+> **New to Wiz Island?** Read the [**User Manual (MANUAL.md)**](MANUAL.md) for step-by-step instructions with screenshots.
+
 ## Architecture
 
-- **Host Machine**: Becomes the SSH server, spins up a secure Ngrok TCP tunnel, and isolates user workspaces.
-- **Client Machine**: Inputs the connection string, updates their local VS Code SSH config, and connects.
+```
+ HOST MACHINE                           CLIENT MACHINE
+ +------------------+                  +------------------+
+ |  Wiz Island CLI  |                  |  Wiz Island CLI  |
+ |  (Host Mode)     |                  |  (User Mode)     |
+ |                  |                  |                  |
+ |  +------------+  |   Ngrok TCP     |  SSH Config      |
+ |  | Sandbox    |<-|--  Tunnel  -----|->Injection       |
+ |  | (VHDX/EXT4)|  |   (Port 22)    |                  |
+ |  +------------+  |                  |  VS Code         |
+ |                  |                  |  Remote-SSH      |
+ |  SSH Server      |                  |                  |
+ |  Guest Account   |                  |                  |
+ +------------------+                  +------------------+
+```
+
+- **Host Machine**: Becomes the SSH server, spins up a secure Ngrok TCP tunnel, and isolates user workspaces in a virtual disk.
+- **Client Machine**: Inputs the connection string, updates their local SSH config, and connects via terminal or VS Code.
 
 ## Project Structure
 
@@ -15,12 +33,14 @@ Wiz Island is a CLI tool written in Python that allows a client to connect secur
 wiz-island/
 ├── setup.bat          # Windows Admin Auto-Installer
 ├── setup.sh           # Linux Sudo Auto-Installer
-├── requirements.txt   # Python dependencies
+├── requirements.txt   # Python dependencies (psutil)
 ├── README.md          # This file
+├── MANUAL.md          # Comprehensive user manual
+├── LICENSE            # MIT License
 └── src/
     ├── __init__.py
-    ├── main.py        # Core CLI Entrypoint (Interactive Menu)
-    ├── host.py        # Host-side orchestration & Dashboard
+    ├── main.py        # Core CLI Entrypoint (Interactive Menu + CLI Args)
+    ├── host.py        # Host-side orchestration & Real-Time Dashboard
     ├── client.py      # Client-side SSH configuration injection
     └── storage.py     # Platform-specific storage virtualization
 ```
@@ -29,15 +49,15 @@ wiz-island/
 
 - **Python 3.10+**
 - **Ngrok account** (free tier works) - [sign up here](https://ngrok.com/)
-- **Administrator/root** privileges (for storage and SSH configuration)
+- **Administrator/root** privileges (for Host Mode)
 
 ## Quick Start
 
 ### Windows
 
 1. Right-click `setup.bat` and select **Run as Administrator**
-2. The script will automatically install Python, OpenSSH Server, and Ngrok if missing
-3. The Wiz Island CLI will launch automatically
+2. The script auto-installs Python, OpenSSH Server, Ngrok, and firewall rules
+3. The Wiz Island CLI launches automatically
 
 ### Linux (Ubuntu/Debian)
 
@@ -46,45 +66,37 @@ chmod +x setup.sh
 sudo ./setup.sh
 ```
 
-The script will install Python3, pip, OpenSSH Server, and Ngrok if missing, then launch the CLI.
-
-### Manual Launch (if dependencies are already installed)
+### Manual Launch
 
 ```bash
 pip install -r requirements.txt
 python src/main.py
 ```
 
-## Usage
+### CLI Arguments
 
-### Host Mode (Option 1)
+```bash
+python src/main.py --version           # Show version
+python src/main.py --mode host         # Skip menu, launch Host Mode
+python src/main.py --mode user         # Skip menu, launch User Mode
+python src/main.py --mode terminate    # Skip menu, run cleanup
+```
 
-1. Select **[1] HOST MODE** from the main menu
-2. Enter the desired storage quota in GB
-3. Enter your Ngrok AuthToken (from [ngrok.com/dashboard](https://dashboard.ngrok.com/get-started/your-authtoken))
-4. The tool will:
-   - Create a virtual disk (VHDX on Windows, EXT4 image on Linux)
-   - Create an isolated guest user account
-   - Configure SSH jailing
-   - Start an Ngrok TCP tunnel
-   - Display a real-time dashboard with system metrics
+## Features
 
-### User Mode (Option 2)
-
-1. Select **[2] USER MODE** from the main menu
-2. Paste the Ngrok connection string provided by the Host (e.g., `tcp://0.tcp.ngrok.io:12345`)
-3. The tool will update your SSH config and provide connection instructions for:
-   - Terminal SSH
-   - VS Code Remote-SSH
-
-### Terminate / Panic Button (Option 3)
-
-Immediately:
-- Terminates the Ngrok tunnel
-- Closes all active guest SSH sessions
-- Unmounts virtual disks
-- Deletes temporary guest accounts
-- Restores the machine to its native state
+| Feature | Description |
+|---------|-------------|
+| Auto-Install | Setup scripts install all dependencies automatically |
+| Virtual Disk Sandbox | Isolated storage (VHDX on Windows, EXT4 on Linux) |
+| SSH Jailing | Guest users are locked into the sandbox directory |
+| Random Passwords | Secure passwords generated fresh each session |
+| Real-Time Dashboard | Live CPU, RAM, disk, network metrics via psutil |
+| Connection Testing | Client tests TCP connectivity before saving config |
+| Panic Button | Instant full cleanup with one keypress |
+| Signal Handling | Graceful shutdown on Ctrl+C / SIGTERM |
+| Firewall Config | Automatic SSH port 22 firewall rules |
+| Cross-Platform | Windows CMD and Linux terminal compatible UI |
+| Logging | Detailed logs saved to `logs/wiz_island.log` |
 
 ## Platform Details
 
@@ -92,11 +104,12 @@ Immediately:
 
 | Feature | Implementation |
 |---------|---------------|
-| Virtual Disk | VHDX via diskpart (expandable, NTFS) |
+| Virtual Disk | Expandable VHDX via diskpart (NTFS) |
 | Mount Point | Drive X:\ |
 | Guest User | WizGuest (standard local account) |
 | Permissions | icacls (restricted to WizGuest + Admins) |
 | SSH Jail | sshd_config Match User + ForceCommand |
+| Firewall | netsh advfirewall rule for port 22 |
 
 ### Linux
 
@@ -105,21 +118,25 @@ Immediately:
 | Virtual Disk | EXT4 image via fallocate/dd |
 | Mount Point | /mnt/wizsandbox |
 | Guest User | wizguest (no sudo) |
-| Permissions | chown + chmod 700 |
-| SSH Jail | sshd_config ChrootDirectory |
+| Permissions | root-owned chroot + user-owned workspace |
+| SSH Jail | sshd_config ChrootDirectory + internal-sftp |
+| Firewall | ufw allow 22/tcp |
 
-## Logging
+## Security
 
-All operations are logged to `logs/wiz_island.log` with timestamps and severity levels. Check this file for debugging if anything goes wrong.
+- Guest accounts have **no administrator/root** privileges
+- Virtual disks are **isolated** from the host filesystem
+- SSH sessions are **jailed** to the sandbox directory
+- Passwords are **randomly generated** for each session (16 chars, mixed)
+- The **Panic Button** provides immediate full cleanup
+- All traffic is encrypted through Ngrok's tunnel
 
-## Security Notes
+## Documentation
 
-- Guest accounts are created with restricted permissions
-- Virtual disks are isolated from the host filesystem
-- SSH sessions are jailed to the sandbox directory
-- The Panic Button provides immediate cleanup
-- StrictHostKeyChecking is disabled for client convenience (the connection goes through Ngrok's encrypted tunnel)
+- **[README.md](README.md)** — Quick reference (this file)
+- **[MANUAL.md](MANUAL.md)** — Comprehensive user manual with troubleshooting
+- **[LICENSE](LICENSE)** — MIT License
 
 ## License
 
-This project is provided as-is for educational and personal use.
+MIT License - See [LICENSE](LICENSE) for details.

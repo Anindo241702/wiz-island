@@ -9,22 +9,55 @@ Windows and Linux platforms.
 import logging
 import os
 import platform
+import random
+import string
 import subprocess
 import shutil
 
 logger = logging.getLogger("wiz_island.storage")
 
+# ============================================================
+#  CONFIGURATION CONSTANTS
+# ============================================================
+
 WINDOWS_GUEST_USER = "WizGuest"
-WINDOWS_GUEST_PASS = "W!zGu3st2024#"
 WINDOWS_MOUNT_DRIVE = "X:"
 WINDOWS_VHDX_PATH = r"C:\WizIsland\sandbox.vhdx"
 WINDOWS_SSHD_CONFIG = r"C:\ProgramData\ssh\sshd_config"
 
 LINUX_GUEST_USER = "wizguest"
-LINUX_GUEST_PASS = "wizguest2024"
 LINUX_MOUNT_DIR = "/mnt/wizsandbox"
 LINUX_IMAGE_PATH = "/opt/wiz_island/sandbox.img"
 
+# Dynamically generated passwords (set during setup, persisted in memory)
+_guest_password = None
+
+
+def _generate_password(length=16):
+    """Generate a secure random password."""
+    chars = string.ascii_letters + string.digits + "!@#$%&*"
+    password = "".join(random.SystemRandom().choice(chars) for _ in range(length))
+    return password
+
+
+def _get_or_create_password():
+    """Return the current session password, generating one if needed."""
+    global _guest_password
+    if _guest_password is None:
+        _guest_password = _generate_password()
+        logger.info("Generated new guest password for this session.")
+    return _guest_password
+
+
+def _set_password(password):
+    """Manually set the guest password (used during testing or override)."""
+    global _guest_password
+    _guest_password = password
+
+
+# ============================================================
+#  PLATFORM DETECTION
+# ============================================================
 
 def get_platform():
     """Return 'windows' or 'linux' based on the current OS."""
@@ -37,8 +70,17 @@ def get_platform():
         raise RuntimeError(f"Unsupported platform: {system}")
 
 
+# ============================================================
+#  COMMAND EXECUTION
+# ============================================================
+
 def run_command(cmd, description="command", shell=True, check=True):
-    """Execute a system command with detailed error handling and logging."""
+    """Execute a system command with detailed error handling and logging.
+
+    All system commands (diskpart, icacls, net user, dd, mount, useradd, etc.)
+    are routed through this function so they are uniformly wrapped in
+    try-except error handling with detailed log reporting.
+    """
     logger.info("Running %s: %s", description, cmd if isinstance(cmd, str) else " ".join(cmd))
     try:
         result = subprocess.run(
@@ -46,7 +88,7 @@ def run_command(cmd, description="command", shell=True, check=True):
             shell=shell,
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=600,
         )
         if result.stdout.strip():
             logger.debug("[stdout] %s", result.stdout.strip())
@@ -58,7 +100,7 @@ def run_command(cmd, description="command", shell=True, check=True):
             )
         return result
     except subprocess.TimeoutExpired:
-        logger.error("[%s] Command timed out after 300 seconds.", description)
+        logger.error("[%s] Command timed out after 600 seconds.", description)
         raise
     except subprocess.CalledProcessError as exc:
         logger.error(
@@ -71,9 +113,56 @@ def run_command(cmd, description="command", shell=True, check=True):
     except FileNotFoundError:
         logger.error("[%s] Command not found: %s", description, cmd)
         raise
+    except OSError as exc:
+        logger.error("[%s] OS error executing command: %s", description, exc)
+        raise
     except Exception as exc:
         logger.error("[%s] Unexpected error: %s", description, exc)
         raise
+
+
+# ============================================================
+#  VALIDATION HELPERS
+# ============================================================
+
+def validate_disk_space(size_gb, path):
+    """Verify there is enough free disk space at the given path."""
+    try:
+        stat = os.statvfs(path) if hasattr(os, "statvfs") else None
+        if stat:
+            free_gb = (stat.f_bavail * stat.f_frsize) / (1024 ** 3)
+            if free_gb < size_gb:
+                raise RuntimeError(
+                    f"Insufficient disk space at {path}: "
+                    f"{free_gb:.1f} GB free, {size_gb} GB required."
+                )
+            logger.info("Disk space check passed: %.1f GB free at %s", free_gb, path)
+        else:
+            # Windows fallback — use shutil
+            total, used, free = shutil.disk_usage(path)
+            free_gb = free / (1024 ** 3)
+            if free_gb < size_gb:
+                raise RuntimeError(
+                    f"Insufficient disk space at {path}: "
+                    f"{free_gb:.1f} GB free, {size_gb} GB required."
+                )
+            logger.info("Disk space check passed: %.1f GB free at %s", free_gb, path)
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        logger.warning("Could not validate disk space: %s (proceeding anyway)", exc)
+
+
+def check_existing_setup():
+    """Check if a previous Wiz Island setup exists and warn the user."""
+    plat = get_platform()
+    if plat == "windows":
+        if os.path.exists(WINDOWS_VHDX_PATH):
+            return True
+    else:
+        if os.path.exists(LINUX_IMAGE_PATH):
+            return True
+    return False
 
 
 # ============================================================
@@ -88,6 +177,31 @@ def windows_create_vhdx(size_gb):
     except OSError as exc:
         logger.error("Failed to create directory %s: %s", vhdx_dir, exc)
         raise
+
+    validate_disk_space(size_gb, vhdx_dir)
+
+    if os.path.exists(WINDOWS_VHDX_PATH):
+        logger.warning("VHDX already exists at %s. Reusing existing disk.", WINDOWS_VHDX_PATH)
+        # Attempt to attach the existing VHDX
+        script_path = os.path.join(vhdx_dir, "diskpart_attach.txt")
+        try:
+            with open(script_path, "w") as f:
+                f.write(
+                    f"select vdisk file=\"{WINDOWS_VHDX_PATH}\"\n"
+                    "attach vdisk\n"
+                    f"select volume X\n"
+                    f"assign letter={WINDOWS_MOUNT_DRIVE[0]}\n"
+                    "exit\n"
+                )
+            run_command(f"diskpart /s \"{script_path}\"", description="diskpart attach existing VHDX")
+        except Exception as exc:
+            logger.warning("Could not reattach existing VHDX: %s", exc)
+        finally:
+            try:
+                os.remove(script_path)
+            except OSError:
+                pass
+        return
 
     size_mb = size_gb * 1024
     diskpart_script = (
@@ -128,6 +242,8 @@ def windows_create_vhdx(size_gb):
 
 def windows_create_guest_user():
     """Create a standard local user 'WizGuest' on Windows."""
+    password = _get_or_create_password()
+
     try:
         result = run_command(
             f'net user {WINDOWS_GUEST_USER}',
@@ -135,14 +251,21 @@ def windows_create_guest_user():
             check=False,
         )
         if result.returncode == 0:
-            logger.info("User '%s' already exists.", WINDOWS_GUEST_USER)
+            logger.info("User '%s' already exists. Resetting password.", WINDOWS_GUEST_USER)
+            try:
+                run_command(
+                    f'net user {WINDOWS_GUEST_USER} {password}',
+                    description="reset WizGuest password",
+                )
+            except Exception as exc:
+                logger.warning("Could not reset password: %s", exc)
             return
     except Exception as exc:
         logger.warning("Could not check user existence: %s", exc)
 
     try:
         run_command(
-            f'net user {WINDOWS_GUEST_USER} {WINDOWS_GUEST_PASS} /add /active:yes '
+            f'net user {WINDOWS_GUEST_USER} {password} /add /active:yes '
             f'/comment:"Wiz Island Guest Account" /passwordchg:no',
             description="create WizGuest user",
         )
@@ -207,19 +330,54 @@ def windows_configure_ssh_jail():
         raise
 
 
+def windows_configure_firewall():
+    """Ensure Windows Firewall allows inbound SSH connections on port 22."""
+    try:
+        run_command(
+            'netsh advfirewall firewall show rule name="WizIsland SSH"',
+            description="check SSH firewall rule",
+            check=False,
+        )
+        # If rule exists, we're done
+        result = run_command(
+            'netsh advfirewall firewall show rule name="WizIsland SSH"',
+            description="check SSH firewall rule",
+            check=False,
+        )
+        if result.returncode == 0 and "WizIsland SSH" in result.stdout:
+            logger.info("Firewall rule 'WizIsland SSH' already exists.")
+            return
+    except Exception:
+        pass
+
+    try:
+        run_command(
+            'netsh advfirewall firewall add rule name="WizIsland SSH" '
+            'dir=in action=allow protocol=TCP localport=22 '
+            'profile=any enable=yes',
+            description="add SSH firewall rule",
+        )
+        logger.info("Added firewall rule 'WizIsland SSH' for port 22.")
+    except Exception as exc:
+        logger.warning("Could not add firewall rule (SSH may still work): %s", exc)
+
+
 def windows_setup_storage(size_gb):
     """Full Windows storage setup pipeline."""
-    print(f"  [1/4] Creating {size_gb} GB VHDX virtual disk...")
+    print(f"  [1/5] Creating {size_gb} GB VHDX virtual disk...")
     windows_create_vhdx(size_gb)
 
-    print(f"  [2/4] Creating guest user '{WINDOWS_GUEST_USER}'...")
+    print(f"  [2/5] Creating guest user '{WINDOWS_GUEST_USER}'...")
     windows_create_guest_user()
 
-    print(f"  [3/4] Setting permissions on {WINDOWS_MOUNT_DRIVE}...")
+    print(f"  [3/5] Setting permissions on {WINDOWS_MOUNT_DRIVE}...")
     windows_set_permissions()
 
-    print("  [4/4] Configuring SSH jail...")
+    print("  [4/5] Configuring SSH jail...")
     windows_configure_ssh_jail()
+
+    print("  [5/5] Configuring firewall...")
+    windows_configure_firewall()
 
     print("  Storage setup complete.")
 
@@ -270,6 +428,17 @@ def windows_teardown():
     except Exception as exc:
         logger.warning("Could not delete user: %s", exc)
 
+    # Remove firewall rule
+    try:
+        run_command(
+            'netsh advfirewall firewall delete rule name="WizIsland SSH"',
+            description="delete SSH firewall rule",
+            check=False,
+        )
+        logger.info("Removed firewall rule 'WizIsland SSH'.")
+    except Exception as exc:
+        logger.warning("Could not remove firewall rule: %s", exc)
+
     # Remove SSH jail config
     try:
         if os.path.exists(WINDOWS_SSHD_CONFIG):
@@ -302,6 +471,12 @@ def linux_create_image(size_gb):
         logger.error("Failed to create directory %s: %s", image_dir, exc)
         raise
 
+    validate_disk_space(size_gb, image_dir)
+
+    if os.path.exists(LINUX_IMAGE_PATH):
+        logger.warning("Disk image already exists at %s. Reusing.", LINUX_IMAGE_PATH)
+        return
+
     # Use fallocate if available, fallback to dd
     fallocate_path = shutil.which("fallocate")
     if fallocate_path:
@@ -313,13 +488,15 @@ def linux_create_image(size_gb):
         except Exception:
             logger.warning("fallocate failed, falling back to dd.")
             run_command(
-                f"dd if=/dev/zero of=\"{LINUX_IMAGE_PATH}\" bs=1M count={size_gb * 1024} status=progress",
+                f"dd if=/dev/zero of=\"{LINUX_IMAGE_PATH}\" "
+                f"bs=1M count={size_gb * 1024} status=progress",
                 description="dd create disk image",
             )
     else:
         try:
             run_command(
-                f"dd if=/dev/zero of=\"{LINUX_IMAGE_PATH}\" bs=1M count={size_gb * 1024} status=progress",
+                f"dd if=/dev/zero of=\"{LINUX_IMAGE_PATH}\" "
+                f"bs=1M count={size_gb * 1024} status=progress",
                 description="dd create disk image",
             )
         except Exception as exc:
@@ -346,6 +523,19 @@ def linux_mount_image():
         logger.error("Failed to create mount directory %s: %s", LINUX_MOUNT_DIR, exc)
         raise
 
+    # Check if already mounted
+    try:
+        result = run_command(
+            f"mountpoint -q \"{LINUX_MOUNT_DIR}\"",
+            description="check if already mounted",
+            check=False,
+        )
+        if result.returncode == 0:
+            logger.info("%s is already mounted.", LINUX_MOUNT_DIR)
+            return
+    except Exception:
+        pass
+
     try:
         run_command(
             f"mount -o loop \"{LINUX_IMAGE_PATH}\" \"{LINUX_MOUNT_DIR}\"",
@@ -359,6 +549,8 @@ def linux_mount_image():
 
 def linux_create_guest_user():
     """Create a dedicated system user 'wizguest' with no sudo privileges."""
+    password = _get_or_create_password()
+
     try:
         result = run_command(
             f"id {LINUX_GUEST_USER}",
@@ -366,7 +558,14 @@ def linux_create_guest_user():
             check=False,
         )
         if result.returncode == 0:
-            logger.info("User '%s' already exists.", LINUX_GUEST_USER)
+            logger.info("User '%s' already exists. Resetting password.", LINUX_GUEST_USER)
+            try:
+                run_command(
+                    f"echo '{LINUX_GUEST_USER}:{password}' | chpasswd",
+                    description="reset wizguest password",
+                )
+            except Exception as exc:
+                logger.warning("Could not reset password: %s", exc)
             return
     except Exception as exc:
         logger.warning("Could not check user existence: %s", exc)
@@ -377,7 +576,7 @@ def linux_create_guest_user():
             description="create wizguest user",
         )
         run_command(
-            f"echo '{LINUX_GUEST_USER}:{LINUX_GUEST_PASS}' | chpasswd",
+            f"echo '{LINUX_GUEST_USER}:{password}' | chpasswd",
             description="set wizguest password",
         )
         logger.info("Created user '%s' with home at %s.", LINUX_GUEST_USER, LINUX_MOUNT_DIR)
@@ -387,15 +586,32 @@ def linux_create_guest_user():
 
 
 def linux_set_permissions():
-    """Restrict ownership of /mnt/wizsandbox to the wizguest user."""
+    """Restrict ownership of /mnt/wizsandbox to the wizguest user.
+
+    For ChrootDirectory to work, the chroot path and all parent directories
+    must be owned by root with no group/other write permissions. We create
+    a writable subdirectory inside for the user's actual workspace.
+    """
     try:
+        # ChrootDirectory requires root ownership on the mount point
         run_command(
-            f"chown -R {LINUX_GUEST_USER}:{LINUX_GUEST_USER} \"{LINUX_MOUNT_DIR}\"",
-            description="chown sandbox directory",
+            f"chown root:root \"{LINUX_MOUNT_DIR}\"",
+            description="chown sandbox to root (ChrootDirectory requirement)",
         )
         run_command(
-            f"chmod 700 \"{LINUX_MOUNT_DIR}\"",
+            f"chmod 755 \"{LINUX_MOUNT_DIR}\"",
             description="chmod sandbox directory",
+        )
+        # Create a writable workspace subdirectory for the guest user
+        workspace = os.path.join(LINUX_MOUNT_DIR, "workspace")
+        os.makedirs(workspace, exist_ok=True)
+        run_command(
+            f"chown {LINUX_GUEST_USER}:{LINUX_GUEST_USER} \"{workspace}\"",
+            description="chown workspace directory",
+        )
+        run_command(
+            f"chmod 700 \"{workspace}\"",
+            description="chmod workspace directory",
         )
         logger.info("Permissions set on %s for %s.", LINUX_MOUNT_DIR, LINUX_GUEST_USER)
     except Exception as exc:
@@ -413,6 +629,7 @@ def linux_configure_ssh_jail():
         f"    ForceCommand internal-sftp\n"
         f"    AllowTcpForwarding no\n"
         f"    X11Forwarding no\n"
+        f"    PasswordAuthentication yes\n"
     )
 
     try:
@@ -430,7 +647,7 @@ def linux_configure_ssh_jail():
         logger.info("Appended SSH jail block for '%s' to sshd_config.", LINUX_GUEST_USER)
 
         run_command(
-            "systemctl restart sshd",
+            "systemctl restart sshd || systemctl restart ssh",
             description="restart sshd service",
         )
     except IOError as exc:
@@ -441,22 +658,43 @@ def linux_configure_ssh_jail():
         raise
 
 
+def linux_configure_firewall():
+    """Ensure the firewall allows inbound SSH connections on port 22."""
+    ufw_path = shutil.which("ufw")
+    if not ufw_path:
+        logger.info("ufw not found, skipping firewall configuration.")
+        return
+
+    try:
+        run_command(
+            "ufw allow 22/tcp",
+            description="allow SSH through ufw",
+            check=False,
+        )
+        logger.info("Firewall rule for SSH port 22 configured via ufw.")
+    except Exception as exc:
+        logger.warning("Could not configure ufw (SSH may still work): %s", exc)
+
+
 def linux_setup_storage(size_gb):
     """Full Linux storage setup pipeline."""
-    print(f"  [1/5] Creating {size_gb} GB disk image...")
+    print(f"  [1/6] Creating {size_gb} GB disk image...")
     linux_create_image(size_gb)
 
-    print(f"  [2/5] Mounting image at {LINUX_MOUNT_DIR}...")
+    print(f"  [2/6] Mounting image at {LINUX_MOUNT_DIR}...")
     linux_mount_image()
 
-    print(f"  [3/5] Creating guest user '{LINUX_GUEST_USER}'...")
+    print(f"  [3/6] Creating guest user '{LINUX_GUEST_USER}'...")
     linux_create_guest_user()
 
-    print(f"  [4/5] Setting permissions on {LINUX_MOUNT_DIR}...")
+    print(f"  [4/6] Setting permissions on {LINUX_MOUNT_DIR}...")
     linux_set_permissions()
 
-    print("  [5/5] Configuring SSH jail...")
+    print("  [5/6] Configuring SSH jail...")
     linux_configure_ssh_jail()
+
+    print("  [6/6] Configuring firewall...")
+    linux_configure_firewall()
 
     print("  Storage setup complete.")
 
@@ -469,11 +707,21 @@ def linux_teardown():
     """Remove disk image, guest user, and SSH jail config on Linux."""
     print("  [*] Tearing down Linux sandbox...")
 
+    # Kill any remaining processes by the guest user
+    try:
+        run_command(
+            f"pkill -u {LINUX_GUEST_USER}",
+            description="kill remaining wizguest processes",
+            check=False,
+        )
+    except Exception as exc:
+        logger.warning("Could not kill guest processes: %s", exc)
+
     # Unmount
     try:
         run_command(
-            f"umount \"{LINUX_MOUNT_DIR}\"",
-            description="unmount sandbox",
+            f"umount -l \"{LINUX_MOUNT_DIR}\"",
+            description="lazy unmount sandbox",
             check=False,
         )
         logger.info("Unmounted %s.", LINUX_MOUNT_DIR)
@@ -491,7 +739,7 @@ def linux_teardown():
     # Remove mount directory
     try:
         if os.path.exists(LINUX_MOUNT_DIR):
-            os.rmdir(LINUX_MOUNT_DIR)
+            shutil.rmtree(LINUX_MOUNT_DIR, ignore_errors=True)
             logger.info("Removed mount directory: %s", LINUX_MOUNT_DIR)
     except OSError as exc:
         logger.warning("Could not remove mount dir: %s", exc)
@@ -512,14 +760,14 @@ def linux_teardown():
     try:
         if os.path.exists(sshd_config):
             with open(sshd_config, "r") as f:
-                lines = f.read()
+                content = f.read()
             marker = "# --- Wiz Island SSH Jail ---"
-            if marker in lines:
-                cleaned = lines[:lines.index(marker)].rstrip() + "\n"
+            if marker in content:
+                cleaned = content[:content.index(marker)].rstrip() + "\n"
                 with open(sshd_config, "w") as f:
                     f.write(cleaned)
                 logger.info("Removed SSH jail block from sshd_config.")
-                run_command("systemctl restart sshd",
+                run_command("systemctl restart sshd || systemctl restart ssh",
                             description="restart sshd", check=False)
     except Exception as exc:
         logger.warning("Could not clean sshd_config: %s", exc)
@@ -532,12 +780,23 @@ def linux_teardown():
 # ============================================================
 
 def setup_storage(size_gb):
-    """Set up storage on the current platform."""
+    """Set up storage on the current platform.
+
+    Returns True on success, raises an exception on failure.
+    """
+    if check_existing_setup():
+        print("\n  [WARNING] Previous Wiz Island setup detected.")
+        response = input("  Do you want to reuse the existing setup? (yes/no): ").strip().lower()
+        if response not in ("yes", "y"):
+            print("  Cleaning up previous setup first...")
+            teardown_storage()
+
     plat = get_platform()
     if plat == "windows":
         windows_setup_storage(size_gb)
     else:
         linux_setup_storage(size_gb)
+    return True
 
 
 def teardown_storage():
@@ -547,6 +806,9 @@ def teardown_storage():
         windows_teardown()
     else:
         linux_teardown()
+    # Clear the session password
+    global _guest_password
+    _guest_password = None
 
 
 def get_mount_path():
@@ -561,7 +823,8 @@ def get_mount_path():
 def get_guest_credentials():
     """Return (username, password) for the guest account on the current platform."""
     plat = get_platform()
+    password = _get_or_create_password()
     if plat == "windows":
-        return WINDOWS_GUEST_USER, WINDOWS_GUEST_PASS
+        return WINDOWS_GUEST_USER, password
     else:
-        return LINUX_GUEST_USER, LINUX_GUEST_PASS
+        return LINUX_GUEST_USER, password

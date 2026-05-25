@@ -5,14 +5,17 @@ Handles Ngrok tunnel creation, real-time system monitoring dashboard,
 and host-mode lifecycle management.
 """
 
+import json
 import logging
 import os
 import platform
 import re
+import signal
 import subprocess
 import sys
 import threading
 import time
+import urllib.request
 
 import psutil
 
@@ -24,6 +27,8 @@ logger = logging.getLogger("wiz_island.host")
 _ngrok_process = None
 _tunnel_url = None
 _running = False
+_start_time = None
+_lock = threading.Lock()
 
 
 def clear_screen():
@@ -31,29 +36,51 @@ def clear_screen():
     os.system("cls" if platform.system() == "Windows" else "clear")
 
 
+def _format_uptime(seconds):
+    """Format seconds into a human-readable uptime string."""
+    hours, remainder = divmod(int(seconds), 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours}h {minutes}m {secs}s"
+    elif minutes > 0:
+        return f"{minutes}m {secs}s"
+    else:
+        return f"{secs}s"
+
+
 def prompt_storage_quota():
     """Ask the user for a storage quota in GB."""
     while True:
         try:
             raw = input("\n  Enter storage quota in GB (e.g., 10): ").strip()
+            if not raw:
+                print("  Please enter a value.")
+                continue
             size_gb = int(raw)
             if size_gb < 1:
                 print("  Please enter a value of at least 1 GB.")
                 continue
             if size_gb > 500:
-                print("  Maximum recommended size is 500 GB.")
-                continue
+                confirm = input(
+                    f"  {size_gb} GB is very large. Are you sure? (yes/no): "
+                ).strip().lower()
+                if confirm not in ("yes", "y"):
+                    continue
             return size_gb
         except ValueError:
             print("  Invalid input. Please enter a whole number.")
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Cancelled.")
+            return None
 
 
 def prompt_ngrok_authtoken():
     """Prompt the user for their Ngrok auth token and apply it."""
-    token = input("\n  Enter your Ngrok AuthToken: ").strip()
+    print("\n  You can get your AuthToken from: https://dashboard.ngrok.com/get-started/your-authtoken")
+    token = input("  Enter your Ngrok AuthToken: ").strip()
     if not token:
         print("  [ERROR] AuthToken cannot be empty.")
-        sys.exit(1)
+        return False
 
     try:
         storage.run_command(
@@ -61,14 +88,20 @@ def prompt_ngrok_authtoken():
             description="apply Ngrok authtoken",
         )
         print("  Ngrok AuthToken applied successfully.")
+        return True
     except Exception as exc:
         logger.error("Failed to apply Ngrok authtoken: %s", exc)
         print(f"  [ERROR] Failed to apply AuthToken: {exc}")
-        sys.exit(1)
+        return False
 
 
 def start_ngrok_tunnel():
-    """Start an Ngrok TCP tunnel on port 22 and parse the public URL."""
+    """Start an Ngrok TCP tunnel on port 22 and parse the public URL.
+
+    Uses two detection methods:
+    1. Parse the tunnel URL from ngrok stdout logs
+    2. Fallback: Query the ngrok local API at 127.0.0.1:4040
+    """
     global _ngrok_process, _tunnel_url
 
     print("\n  Starting Ngrok TCP tunnel on port 22...")
@@ -83,21 +116,23 @@ def start_ngrok_tunnel():
     except FileNotFoundError:
         logger.error("Ngrok binary not found in PATH.")
         print("  [ERROR] Ngrok is not installed or not in PATH.")
-        sys.exit(1)
+        print("  Please ensure Ngrok is installed and accessible.")
+        return None
     except Exception as exc:
         logger.error("Failed to start Ngrok: %s", exc)
         print(f"  [ERROR] Failed to start Ngrok: {exc}")
-        sys.exit(1)
+        return None
 
-    # Parse the tunnel URL from ngrok output
+    # Method 1: Parse the tunnel URL from ngrok output
     url_pattern = re.compile(r"url=(tcp://[\w\.\-]+:\d+)")
-    deadline = time.time() + 30
+    deadline = time.time() + 20
 
     while time.time() < deadline:
         if _ngrok_process.poll() is not None:
-            logger.error("Ngrok process exited unexpectedly.")
-            print("  [ERROR] Ngrok exited unexpectedly. Check your AuthToken.")
-            sys.exit(1)
+            stdout_remaining = _ngrok_process.stdout.read() if _ngrok_process.stdout else ""
+            logger.error("Ngrok process exited unexpectedly. Output: %s", stdout_remaining)
+            print("  [ERROR] Ngrok exited unexpectedly. Check your AuthToken and network.")
+            return None
 
         line = _ngrok_process.stdout.readline()
         if not line:
@@ -111,23 +146,27 @@ def start_ngrok_tunnel():
             logger.info("Ngrok tunnel established: %s", _tunnel_url)
             return _tunnel_url
 
-    # Fallback: try the ngrok API
-    try:
-        import json
-        import urllib.request
-        resp = urllib.request.urlopen("http://127.0.0.1:4040/api/tunnels", timeout=5)
-        data = json.loads(resp.read().decode())
-        for tunnel in data.get("tunnels", []):
-            public_url = tunnel.get("public_url", "")
-            if public_url.startswith("tcp://"):
-                _tunnel_url = public_url
-                logger.info("Ngrok tunnel (via API): %s", _tunnel_url)
-                return _tunnel_url
-    except Exception as exc:
-        logger.warning("Could not query Ngrok API: %s", exc)
+    # Method 2: Fallback — try the ngrok local API
+    print("  Trying Ngrok API fallback...")
+    for attempt in range(5):
+        try:
+            resp = urllib.request.urlopen(
+                "http://127.0.0.1:4040/api/tunnels", timeout=5
+            )
+            data = json.loads(resp.read().decode())
+            for tunnel in data.get("tunnels", []):
+                public_url = tunnel.get("public_url", "")
+                if public_url.startswith("tcp://"):
+                    _tunnel_url = public_url
+                    logger.info("Ngrok tunnel (via API): %s", _tunnel_url)
+                    return _tunnel_url
+        except Exception as exc:
+            logger.debug("Ngrok API attempt %d failed: %s", attempt + 1, exc)
+            time.sleep(2)
 
-    print("  [ERROR] Could not determine Ngrok tunnel URL within timeout.")
-    sys.exit(1)
+    print("  [ERROR] Could not determine Ngrok tunnel URL.")
+    print("  Please check your Ngrok AuthToken and internet connection.")
+    return None
 
 
 def get_active_connections():
@@ -159,9 +198,31 @@ def get_disk_usage(path):
         return {"total_gb": 0, "used_gb": 0, "free_gb": 0, "percent": 0}
 
 
+def get_network_io():
+    """Return network I/O counters."""
+    try:
+        counters = psutil.net_io_counters()
+        return {
+            "bytes_sent": counters.bytes_sent,
+            "bytes_recv": counters.bytes_recv,
+        }
+    except Exception as exc:
+        logger.debug("Network IO error: %s", exc)
+        return {"bytes_sent": 0, "bytes_recv": 0}
+
+
+def _format_bytes(num_bytes):
+    """Format bytes into human-readable string."""
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(num_bytes) < 1024.0:
+            return f"{num_bytes:.1f} {unit}"
+        num_bytes /= 1024.0
+    return f"{num_bytes:.1f} PB"
+
+
 def render_dashboard():
     """Render the real-time dashboard to the terminal."""
-    global _running
+    global _running, _start_time
 
     mount_path = storage.get_mount_path()
     guest_user, guest_pass = storage.get_guest_credentials()
@@ -177,15 +238,29 @@ def render_dashboard():
             ssh_port = parts[1]
 
     _running = True
+    _start_time = time.time()
+    prev_net = get_network_io()
+    prev_time = time.time()
 
     while _running:
         try:
             clear_screen()
 
             cpu_percent = psutil.cpu_percent(interval=0.5)
+            cpu_count = psutil.cpu_count(logical=True)
             mem = psutil.virtual_memory()
             disk = get_disk_usage(mount_path)
             connections = get_active_connections()
+            uptime = _format_uptime(time.time() - _start_time)
+
+            # Calculate network rates
+            curr_net = get_network_io()
+            curr_time = time.time()
+            elapsed = max(curr_time - prev_time, 0.1)
+            send_rate = (curr_net["bytes_sent"] - prev_net["bytes_sent"]) / elapsed
+            recv_rate = (curr_net["bytes_recv"] - prev_net["bytes_recv"]) / elapsed
+            prev_net = curr_net
+            prev_time = curr_time
 
             # Build the dashboard
             lines = [
@@ -197,19 +272,23 @@ def render_dashboard():
                 f"   TUNNEL URL       : {tunnel_display}",
                 f"   SSH Command      : ssh {guest_user}@{ssh_host} -p {ssh_port}",
                 f"   Guest Password   : {guest_pass}",
+                f"   Uptime           : {uptime}",
                 "",
                 "  ------------------------------------------------------------",
                 "   SYSTEM PERFORMANCE",
                 "  ------------------------------------------------------------",
-                f"   CPU Usage        : {_progress_bar(cpu_percent)} {cpu_percent:.1f}%",
+                f"   CPU Usage        : {_progress_bar(cpu_percent)} {cpu_percent:.1f}%"
+                f"  ({cpu_count} cores)",
                 f"   RAM Usage        : {_progress_bar(mem.percent)} {mem.percent:.1f}%"
                 f"  ({mem.used // (1024**2)} / {mem.total // (1024**2)} MB)",
+                f"   RAM Available    : {_format_bytes(mem.available)}",
                 "",
                 "  ------------------------------------------------------------",
                 "   STORAGE (Sandbox)",
                 "  ------------------------------------------------------------",
                 f"   Total            : {disk['total_gb']} GB",
-                f"   Used             : {disk['used_gb']} GB ({disk['percent']}%)",
+                f"   Used             : {_progress_bar(disk['percent'])} "
+                f"{disk['used_gb']} GB ({disk['percent']}%)",
                 f"   Free             : {disk['free_gb']} GB",
                 f"   Mount Path       : {mount_path}",
                 "",
@@ -217,9 +296,13 @@ def render_dashboard():
                 "   NETWORK",
                 "  ------------------------------------------------------------",
                 f"   Active SSH Conns : {connections}",
+                f"   Upload Rate      : {_format_bytes(send_rate)}/s",
+                f"   Download Rate    : {_format_bytes(recv_rate)}/s",
+                f"   Total Sent       : {_format_bytes(curr_net['bytes_sent'])}",
+                f"   Total Received   : {_format_bytes(curr_net['bytes_recv'])}",
                 "",
                 "  ============================================================",
-                "   Press 'x' then Enter to activate PANIC BUTTON",
+                "   Press 'x' then Enter to activate PANIC BUTTON (Ctrl+C also works)",
                 "  ============================================================",
                 "",
             ]
@@ -245,19 +328,20 @@ def _progress_bar(percent, width=20):
 def stop_ngrok():
     """Terminate the Ngrok process."""
     global _ngrok_process, _tunnel_url
-    if _ngrok_process:
-        try:
-            _ngrok_process.terminate()
-            _ngrok_process.wait(timeout=10)
-            logger.info("Ngrok process terminated.")
-        except subprocess.TimeoutExpired:
-            _ngrok_process.kill()
-            logger.warning("Ngrok process killed forcefully.")
-        except Exception as exc:
-            logger.error("Error stopping Ngrok: %s", exc)
-        finally:
-            _ngrok_process = None
-            _tunnel_url = None
+    with _lock:
+        if _ngrok_process:
+            try:
+                _ngrok_process.terminate()
+                _ngrok_process.wait(timeout=10)
+                logger.info("Ngrok process terminated.")
+            except subprocess.TimeoutExpired:
+                _ngrok_process.kill()
+                logger.warning("Ngrok process killed forcefully.")
+            except Exception as exc:
+                logger.error("Error stopping Ngrok: %s", exc)
+            finally:
+                _ngrok_process = None
+                _tunnel_url = None
 
 
 def kill_guest_sessions():
@@ -267,7 +351,6 @@ def kill_guest_sessions():
 
     try:
         if plat == "windows":
-            # Find and kill sshd processes for the guest user
             storage.run_command(
                 f'taskkill /F /FI "USERNAME eq {guest_user}" /IM sshd.exe',
                 description="kill guest SSH sessions",
@@ -290,14 +373,18 @@ def panic_shutdown():
     _running = False
 
     print("\n")
-    print("  !! PANIC BUTTON ACTIVATED !!")
+    print("  ============================================================")
+    print("   !! PANIC BUTTON ACTIVATED !!")
+    print("  ============================================================")
     print("  Initiating emergency shutdown sequence...\n")
 
     print("  [1/4] Stopping Ngrok tunnel...")
     stop_ngrok()
+    print("         Done.")
 
     print("  [2/4] Terminating guest SSH sessions...")
     kill_guest_sessions()
+    print("         Done.")
 
     print("  [3/4] Unmounting virtual disks and removing guest accounts...")
     try:
@@ -305,11 +392,22 @@ def panic_shutdown():
     except Exception as exc:
         logger.error("Teardown error: %s", exc)
         print(f"  [WARNING] Partial teardown: {exc}")
+    print("         Done.")
 
     print("  [4/4] Cleanup complete.")
-    print("\n  Machine returned to native state.")
-    print("  Press Enter to exit.")
-    input()
+    print("\n  ============================================================")
+    print("   Machine returned to native state.")
+    print("  ============================================================")
+
+    if _start_time:
+        print(f"  Session was active for: {_format_uptime(time.time() - _start_time)}")
+
+    print("\n  Press Enter to exit.")
+
+    try:
+        input()
+    except (EOFError, KeyboardInterrupt):
+        pass
 
 
 def panic_listener():
@@ -326,9 +424,20 @@ def panic_listener():
             break
 
 
+def _signal_handler(signum, frame):
+    """Handle SIGINT/SIGTERM gracefully."""
+    logger.info("Received signal %d, initiating panic shutdown.", signum)
+    panic_shutdown()
+    sys.exit(0)
+
+
 def run_host_mode():
     """Main entry point for Host Mode."""
     global _running
+
+    # Install signal handlers
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
 
     print("\n  ============================================================")
     print("   WIZ ISLAND - HOST MODE SETUP")
@@ -336,6 +445,8 @@ def run_host_mode():
 
     # Step 1: Storage quota
     size_gb = prompt_storage_quota()
+    if size_gb is None:
+        return
     print(f"\n  Setting up {size_gb} GB sandbox environment...\n")
 
     try:
@@ -344,14 +455,23 @@ def run_host_mode():
         logger.error("Storage setup failed: %s", exc)
         print(f"\n  [ERROR] Storage setup failed: {exc}")
         print("  Please check the log for details and ensure you are running as Admin/root.")
+        input("\n  Press Enter to return to the menu...")
         return
 
     # Step 2: Ngrok AuthToken
-    prompt_ngrok_authtoken()
+    if not prompt_ngrok_authtoken():
+        input("\n  Press Enter to return to the menu...")
+        return
 
     # Step 3: Start tunnel
     tunnel_url = start_ngrok_tunnel()
+    if not tunnel_url:
+        print("  [ERROR] Could not establish Ngrok tunnel.")
+        input("\n  Press Enter to return to the menu...")
+        return
+
     print(f"\n  Tunnel established: {tunnel_url}")
+    print("  Launching dashboard...\n")
 
     # Step 4: Launch dashboard with panic listener
     listener_thread = threading.Thread(target=panic_listener, daemon=True)
