@@ -681,19 +681,19 @@ def windows_configure_firewall():
 
 
 def _windows_set_default_shell():
-    """Set the default SSH shell to PowerShell instead of cmd.exe.
+    """Set the default SSH shell to PowerShell and configure guest profile.
 
-    This allows VS Code and terminal users to have PowerShell, and they
-    can still launch cmd, git bash, or any other shell from there.
+    Sets PowerShell as the default SSH shell, and creates a system-wide
+    PowerShell profile that redirects the guest user to X:\\ on login.
+    This is needed because Windows SSH ignores the /homedir flag from
+    'net user' and always drops users into C:\\Users\\<username>.
     """
     ps_path = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
     if not os.path.exists(ps_path):
         logger.info("PowerShell not found at default path, skipping shell config.")
         return
 
-    reg_key = (
-        r"HKLM\SOFTWARE\OpenSSH"
-    )
+    reg_key = r"HKLM\SOFTWARE\OpenSSH"
     try:
         run_command(
             f'reg add "{reg_key}" /v DefaultShell /t REG_SZ '
@@ -703,6 +703,37 @@ def _windows_set_default_shell():
         logger.info("Default SSH shell set to PowerShell.")
     except Exception as exc:
         logger.warning("Could not set default SSH shell: %s", exc)
+
+    # Create a system-wide PowerShell profile that sends the guest to X:\
+    profile_dir = r"C:\Windows\System32\WindowsPowerShell\v1.0"
+    profile_path = os.path.join(profile_dir, "profile.ps1")
+    sandbox_dir = WINDOWS_MOUNT_DRIVE + "\\"
+
+    profile_block = (
+        f"\n# --- Wiz Island Guest Redirect ---\n"
+        f"if ($env:USERNAME -eq '{WINDOWS_GUEST_USER}') {{\n"
+        f"    if (Test-Path '{sandbox_dir}') {{\n"
+        f"        Set-Location '{sandbox_dir}'\n"
+        f"    }}\n"
+        f"}}\n"
+        f"# --- End Wiz Island ---\n"
+    )
+
+    try:
+        existing = ""
+        if os.path.exists(profile_path):
+            with open(profile_path, "r") as f:
+                existing = f.read()
+
+        if "Wiz Island Guest Redirect" in existing:
+            logger.info("PowerShell profile redirect already configured.")
+            return
+
+        with open(profile_path, "a") as f:
+            f.write(profile_block)
+        logger.info("Added guest redirect to PowerShell profile: %s", profile_path)
+    except Exception as exc:
+        logger.warning("Could not configure PowerShell profile: %s", exc)
 
 
 def windows_setup_storage(size_gb):
@@ -804,6 +835,24 @@ def windows_teardown():
                 run_command("net start sshd", description="start sshd", check=False)
     except Exception as exc:
         logger.warning("Could not clean sshd_config: %s", exc)
+
+    # Remove PowerShell profile redirect
+    try:
+        profile_path = r"C:\Windows\System32\WindowsPowerShell\v1.0\profile.ps1"
+        if os.path.exists(profile_path):
+            with open(profile_path, "r") as f:
+                content = f.read()
+            start_marker = "# --- Wiz Island Guest Redirect ---"
+            end_marker = "# --- End Wiz Island ---"
+            if start_marker in content:
+                before = content[:content.index(start_marker)]
+                after_idx = content.find(end_marker)
+                after = content[after_idx + len(end_marker):] if after_idx >= 0 else ""
+                with open(profile_path, "w") as f:
+                    f.write(before.rstrip() + after)
+                logger.info("Removed guest redirect from PowerShell profile.")
+    except Exception as exc:
+        logger.warning("Could not clean PowerShell profile: %s", exc)
 
     print("  Teardown complete.")
 

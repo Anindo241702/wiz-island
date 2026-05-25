@@ -302,6 +302,10 @@ def print_connection_instructions(host, port, config_path, username="wizguest",
         "   - To remove this config later, select 'Clean SSH Config'",
         "     from the User Mode menu.",
         "",
+        "   IMPORTANT: The tunnel URL changes every time the Host",
+        "   restarts. If you get 'Could not resolve hostname', re-run",
+        "   User Mode with the new URL from the Host dashboard.",
+        "",
         "  ============================================================",
     ])
     print("\n".join(lines))
