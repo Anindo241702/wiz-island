@@ -381,6 +381,8 @@ Once connected:
 
 When you run a dev server in the VS Code terminal (e.g., `npm run dev`, `flask run`), VS Code automatically detects the open port and offers to forward it. Click "Open in Browser" to view the app in **your local browser**.
 
+> **No router configuration needed.** Port forwarding works entirely over the existing SSH tunnel. The host doesn't need to open any ports or touch their router — everything travels through the same Pinggy tunnel.
+
 You can also manually forward ports via the **Ports** panel in VS Code (`Ctrl+Shift+P` → "Ports: Focus on Ports View").
 
 Manual port forwarding from terminal:

@@ -83,7 +83,9 @@ flask run          # Starts on localhost:5000
 python manage.py runserver  # Starts on localhost:8000
 ```
 
-VS Code automatically detects the port and offers to forward it. You can then open `localhost:3000` in **your local browser** (on your own machine) and see the app running on the host's hardware. This works because SSH port forwarding is enabled.
+VS Code automatically detects the port and offers to forward it. You can then open `localhost:3000` in **your local browser** (on your own machine) and see the app running on the host's hardware.
+
+> **No router configuration needed.** Port forwarding happens entirely over the existing SSH tunnel. The host doesn't need to open any ports on their router or configure any firewall rules — everything travels through the same Pinggy tunnel that was already established for SSH. This is fully automatic.
 
 You can also manually forward ports:
 ```bash
