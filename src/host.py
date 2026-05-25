@@ -26,6 +26,7 @@ _tunnel_process = None
 _tunnel_url = None
 _running = False
 _start_time = None
+_max_coders = 0
 _lock = threading.Lock()
 
 
@@ -294,6 +295,20 @@ def _get_gpu_info():
     return "Not detected"
 
 
+def _move_cursor_home():
+    """Move cursor to top-left of terminal without clearing the screen."""
+    if platform.system() == "Windows":
+        try:
+            import ctypes
+            handle = ctypes.windll.kernel32.GetStdHandle(-11)
+            ctypes.windll.kernel32.SetConsoleCursorPosition(handle, 0)
+        except Exception:
+            os.system("cls")
+    else:
+        sys.stdout.write("\033[H")
+        sys.stdout.flush()
+
+
 def render_dashboard():
     """Render the real-time dashboard to the terminal."""
     global _running, _start_time
@@ -316,9 +331,15 @@ def render_dashboard():
     prev_net = get_network_io()
     prev_time = time.time()
 
+    # Initial clear, then use cursor repositioning for flicker-free updates
+    clear_screen()
+
+    # Determine dashboard line count for padding
+    dash_width = 62
+
     while _running:
         try:
-            clear_screen()
+            _move_cursor_home()
 
             cpu_percent = psutil.cpu_percent(interval=0.5)
             cpu_count = psutil.cpu_count(logical=True)
@@ -336,53 +357,67 @@ def render_dashboard():
             prev_net = curr_net
             prev_time = curr_time
 
-            # Build the dashboard
+            # Connection status
+            if _max_coders > 0:
+                conn_display = f"{connections} / {_max_coders} max"
+            else:
+                conn_display = str(connections)
+
+            # Build the dashboard — pad each line to overwrite previous content
+            def pad(s):
+                return s.ljust(dash_width)
+
             lines = [
-                "",
-                "  ============================================================",
-                "   WIZ ISLAND - HOST DASHBOARD",
-                "  ============================================================",
-                "",
-                f"   TUNNEL URL       : {tunnel_display}",
-                f"   SSH Command      : ssh {guest_user}@{ssh_host} -p {ssh_port}",
-                f"   Guest Password   : {guest_pass}",
-                f"   Uptime           : {uptime}",
-                "",
-                "  ------------------------------------------------------------",
-                "   SYSTEM PERFORMANCE",
-                "  ------------------------------------------------------------",
-                f"   CPU Usage        : {_progress_bar(cpu_percent)} {cpu_percent:.1f}%"
-                f"  ({cpu_count} cores)",
-                f"   RAM Usage        : {_progress_bar(mem.percent)} {mem.percent:.1f}%"
-                f"  ({mem.used // (1024**2)} / {mem.total // (1024**2)} MB)",
-                f"   RAM Available    : {_format_bytes(mem.available)}",
-                f"   GPU             : {_get_gpu_info()}",
-                "",
-                "  ------------------------------------------------------------",
-                "   STORAGE (Sandbox)",
-                "  ------------------------------------------------------------",
-                f"   Total            : {disk['total_gb']} GB",
-                f"   Used             : {_progress_bar(disk['percent'])} "
-                f"{disk['used_gb']} GB ({disk['percent']}%)",
-                f"   Free             : {disk['free_gb']} GB",
-                f"   Mount Path       : {mount_path}",
-                "",
-                "  ------------------------------------------------------------",
-                "   NETWORK",
-                "  ------------------------------------------------------------",
-                f"   Active SSH Conns : {connections}",
-                f"   Upload Rate      : {_format_bytes(send_rate)}/s",
-                f"   Download Rate    : {_format_bytes(recv_rate)}/s",
-                f"   Total Sent       : {_format_bytes(curr_net['bytes_sent'])}",
-                f"   Total Received   : {_format_bytes(curr_net['bytes_recv'])}",
-                "",
-                "  ============================================================",
-                "   Press 'x' then Enter to activate PANIC BUTTON (Ctrl+C also works)",
-                "  ============================================================",
-                "",
+                pad(""),
+                pad("  ============================================================"),
+                pad("   WIZ ISLAND - HOST DASHBOARD"),
+                pad("  ============================================================"),
+                pad(""),
+                pad(f"   TUNNEL URL       : {tunnel_display}"),
+                pad(f"   SSH Command      : ssh {guest_user}@{ssh_host} -p {ssh_port}"),
+                pad(f"   Guest Password   : {guest_pass}"),
+                pad(f"   Uptime           : {uptime}"),
+                pad(""),
+                pad("  ------------------------------------------------------------"),
+                pad("   CODERS CONNECTED"),
+                pad("  ------------------------------------------------------------"),
+                pad(f"   Active Sessions  : {conn_display}"),
+                pad(""),
+                pad("  ------------------------------------------------------------"),
+                pad("   SYSTEM PERFORMANCE"),
+                pad("  ------------------------------------------------------------"),
+                pad(f"   CPU Usage        : {_progress_bar(cpu_percent)} {cpu_percent:.1f}%"
+                    f"  ({cpu_count} cores)"),
+                pad(f"   RAM Usage        : {_progress_bar(mem.percent)} {mem.percent:.1f}%"
+                    f"  ({mem.used // (1024**2)} / {mem.total // (1024**2)} MB)"),
+                pad(f"   RAM Available    : {_format_bytes(mem.available)}"),
+                pad(f"   GPU              : {_get_gpu_info()}"),
+                pad(""),
+                pad("  ------------------------------------------------------------"),
+                pad("   STORAGE (Sandbox)"),
+                pad("  ------------------------------------------------------------"),
+                pad(f"   Total            : {disk['total_gb']} GB"),
+                pad(f"   Used             : {_progress_bar(disk['percent'])} "
+                    f"{disk['used_gb']} GB ({disk['percent']}%)"),
+                pad(f"   Free             : {disk['free_gb']} GB"),
+                pad(f"   Mount Path       : {mount_path}"),
+                pad(""),
+                pad("  ------------------------------------------------------------"),
+                pad("   NETWORK"),
+                pad("  ------------------------------------------------------------"),
+                pad(f"   Upload Rate      : {_format_bytes(send_rate)}/s"),
+                pad(f"   Download Rate    : {_format_bytes(recv_rate)}/s"),
+                pad(f"   Total Sent       : {_format_bytes(curr_net['bytes_sent'])}"),
+                pad(f"   Total Received   : {_format_bytes(curr_net['bytes_recv'])}"),
+                pad(""),
+                pad("  ============================================================"),
+                pad("   Press 'x' then Enter to activate PANIC BUTTON (Ctrl+C also works)"),
+                pad("  ============================================================"),
+                pad(""),
             ]
 
-            print("\n".join(lines))
+            sys.stdout.write("\n".join(lines) + "\n")
+            sys.stdout.flush()
             time.sleep(2)
 
         except KeyboardInterrupt:
@@ -508,7 +543,7 @@ def _signal_handler(signum, frame):
 
 def run_host_mode():
     """Main entry point for Host Mode."""
-    global _running
+    global _running, _max_coders
 
     # Install signal handlers
     signal.signal(signal.SIGINT, _signal_handler)
@@ -538,6 +573,21 @@ def run_host_mode():
             print(f"  Using default: {default_user}")
     except (EOFError, KeyboardInterrupt):
         print(f"\n  Using default: {default_user}")
+
+    # Max coders prompt
+    try:
+        max_input = input(
+            "\n  Max coders allowed (press Enter for unlimited): "
+        ).strip()
+        if max_input:
+            _max_coders = max(1, int(max_input))
+            print(f"  Max coders set to: {_max_coders}")
+        else:
+            _max_coders = 0
+            print("  No limit — unlimited coders can connect.")
+    except (ValueError, EOFError, KeyboardInterrupt):
+        _max_coders = 0
+        print("  No limit — unlimited coders can connect.")
 
     # Step 1: Storage quota
     size_gb = prompt_storage_quota()

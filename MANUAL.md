@@ -22,11 +22,12 @@ A comprehensive guide for new users to set up, configure, and use Wiz Island for
    - [Terminate / Panic Button](#54-terminate--panic-button)
 6. [The Host Dashboard](#6-the-host-dashboard)
 7. [Connecting via VS Code](#7-connecting-via-vs-code)
-8. [Command-Line Arguments](#8-command-line-arguments)
-9. [Troubleshooting](#9-troubleshooting)
-10. [Security Considerations](#10-security-considerations)
-11. [FAQ](#11-faq)
-12. [Uninstalling](#12-uninstalling)
+8. [Using the Host's GPU, CPU, and Storage](#8-using-the-hosts-gpu-cpu-and-storage-for-coders)
+9. [Command-Line Arguments](#9-command-line-arguments)
+10. [Troubleshooting](#10-troubleshooting)
+11. [Security Considerations](#11-security-considerations)
+12. [FAQ](#12-faq)
+13. [Uninstalling](#13-uninstalling)
 
 ---
 
@@ -368,7 +369,100 @@ Once connected:
 
 ---
 
-## 8. Command-Line Arguments
+## 8. Using the Host's GPU, CPU, and Storage (For Coders)
+
+Once connected via VS Code Remote-SSH (or a regular SSH terminal), you are running commands **directly on the Host machine**. Everything executes using the Host's hardware.
+
+### Uploading Code
+
+**Via VS Code (drag & drop):**
+1. Open the Explorer panel (left sidebar) in VS Code
+2. Drag your files/folders from your local machine into the Explorer — they upload to the Host's sandbox
+
+**Via VS Code Terminal:**
+```bash
+# You're already on the Host machine in the terminal
+# Create a project folder
+mkdir myproject && cd myproject
+```
+
+**Via SCP (from your local machine):**
+```bash
+# From your local terminal (not VS Code):
+scp -P <port> myfile.py WizIsland:~/myfile.py
+scp -r -P <port> ./myproject WizIsland:~/myproject
+```
+
+### Running Code on the Host's CPU
+
+The terminal in VS Code runs on the Host. Any command you type executes on the Host's CPU:
+
+```bash
+# Python
+python3 script.py
+
+# Node.js
+node app.js
+
+# C/C++
+gcc -o program main.c && ./program
+g++ -O2 -o program main.cpp && ./program
+
+# Java
+javac Main.java && java Main
+
+# Run a build
+make -j$(nproc)    # Uses all Host CPU cores
+```
+
+### Using the Host's GPU
+
+If the Host has an NVIDIA GPU with CUDA installed:
+
+```bash
+# Check GPU availability
+nvidia-smi
+
+# Run CUDA/PyTorch code
+python3 -c "import torch; print(torch.cuda.is_available())"
+
+# Train a model
+python3 train.py --device cuda
+
+# Compile CUDA code
+nvcc -o gpu_program gpu_kernel.cu && ./gpu_program
+```
+
+The GPU is directly accessible — no extra configuration needed. Whatever GPU drivers and toolkits the Host has installed are available to you.
+
+### Storage
+
+Your files are stored in the Host's sandbox:
+- **Windows hosts:** `X:\` drive
+- **Linux hosts:** `/mnt/wizsandbox/workspace`
+
+The sandbox size is set by the Host during setup. Check available space:
+```bash
+df -h .           # Linux
+dir               # Windows
+```
+
+### Multi-Coder Collaboration
+
+Multiple coders can connect simultaneously using the same credentials:
+- All coders share the same sandbox filesystem
+- Each coder gets their own terminal session
+- Files saved by one coder are immediately visible to others
+- The Host dashboard shows how many coders are connected
+
+**Tips for teams:**
+- Create separate folders per coder: `mkdir /workspace/alice`, `mkdir /workspace/bob`
+- Use `git` for version control within the sandbox
+- Communicate about which files you're editing to avoid conflicts
+
+---
+
+## 9. Command-Line Arguments
 
 You can skip the interactive menu by using command-line arguments:
 
@@ -392,7 +486,7 @@ python src/main.py -m terminate
 
 ---
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 ### Common Issues
 
@@ -443,7 +537,7 @@ If you encounter issues not covered here:
 
 ---
 
-## 10. Security Considerations
+## 11. Security Considerations
 
 ### What Wiz Island Does for Security
 
@@ -471,7 +565,7 @@ If you encounter issues not covered here:
 
 ---
 
-## 11. FAQ
+## 12. FAQ
 
 **Q: Is Wiz Island free to use?**
 A: Yes. Wiz Island is completely free. It uses Pinggy's free tier for tunneling, which requires no account or payment.
@@ -502,7 +596,7 @@ A: The Host Mode is designed for Windows and Linux. User Mode (client) works on 
 
 ---
 
-## 12. Uninstalling
+## 13. Uninstalling
 
 ### Quick Cleanup
 
