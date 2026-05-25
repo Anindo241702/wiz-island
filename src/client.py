@@ -112,19 +112,14 @@ def update_ssh_config(host, port, username="wizguest", alias="WizIsland"):
             with open(config_path, "r") as f:
                 existing = f.read()
 
-        # Remove any previous WizIsland entry
-        marker_start = "# --- Wiz Island Connection ---"
-        if marker_start in existing:
-            parts = existing.split(marker_start)
-            before = parts[0]
-            after_block = parts[1]
-            # Find the next "Host " line or end of file
-            next_host = re.search(r"\n(?=Host\s)", after_block)
-            if next_host:
-                remaining = after_block[next_host.start():]
-            else:
-                remaining = ""
-            existing = before.rstrip() + remaining
+        # Remove any previous WizIsland entry (marker + Host line + indented config)
+        existing = re.sub(
+            r"\n?# --- Wiz Island Connection ---\n"
+            r"Host [^\n]*\n"
+            r"(?:[ \t]+[^\n]*\n)*",
+            "",
+            existing,
+        )
 
         # Append new entry
         with open(config_path, "w") as f:
@@ -162,18 +157,16 @@ def remove_ssh_config(alias="WizIsland"):
             print(f"  No '{alias}' entry found in SSH config.")
             return
 
-        parts = existing.split(marker_start)
-        before = parts[0]
-        after_block = parts[1]
-        next_host = re.search(r"\n(?=Host\s)", after_block)
-        if next_host:
-            remaining = after_block[next_host.start():]
-        else:
-            remaining = ""
-        cleaned = before.rstrip() + remaining
+        cleaned = re.sub(
+            r"\n?# --- Wiz Island Connection ---\n"
+            r"Host [^\n]*\n"
+            r"(?:[ \t]+[^\n]*\n)*",
+            "",
+            existing,
+        )
 
         with open(config_path, "w") as f:
-            f.write(cleaned if cleaned.strip() else "")
+            f.write(cleaned.strip() + "\n" if cleaned.strip() else "")
 
         print(f"  Removed '{alias}' entry from SSH config.")
         logger.info("Removed WizIsland entry from SSH config.")
