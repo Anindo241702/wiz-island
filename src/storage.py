@@ -309,103 +309,110 @@ def _windows_grant_vscode_permissions():
             logger.warning("Could not add to %s: %s", group, exc)
 
 
-def _windows_configure_guest_path():
-    """Ensure system-installed tools are accessible to the guest user.
-
-    When a new Windows user is created, they inherit the Machine PATH but
-    not per-user PATH entries from other accounts. This scans for commonly
-    installed dev tools and adds any missing paths to the Machine PATH.
-    """
-    tool_dirs = [
-        # Python
-        r"C:\Python314", r"C:\Python313", r"C:\Python312", r"C:\Python311",
-        r"C:\Python310", r"C:\Python39",
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Python"),
-        r"C:\Program Files\Python314", r"C:\Program Files\Python313",
-        r"C:\Program Files\Python312", r"C:\Program Files\Python311",
+def _windows_scan_tool_paths():
+    """Scan the system for installed developer tools and return found paths."""
+    candidates = [
+        # Python (system-wide installs)
+        r"C:\Python314", r"C:\Python314\Scripts",
+        r"C:\Python313", r"C:\Python313\Scripts",
+        r"C:\Python312", r"C:\Python312\Scripts",
+        r"C:\Python311", r"C:\Python311\Scripts",
+        r"C:\Python310", r"C:\Python310\Scripts",
+        r"C:\Python39", r"C:\Python39\Scripts",
+        r"C:\Program Files\Python314", r"C:\Program Files\Python314\Scripts",
+        r"C:\Program Files\Python313", r"C:\Program Files\Python313\Scripts",
+        r"C:\Program Files\Python312", r"C:\Program Files\Python312\Scripts",
+        r"C:\Program Files\Python311", r"C:\Program Files\Python311\Scripts",
         # Git
         r"C:\Program Files\Git\cmd",
         r"C:\Program Files\Git\bin",
+        r"C:\Program Files\Git\usr\bin",
         r"C:\Program Files (x86)\Git\cmd",
         # Node.js
         r"C:\Program Files\nodejs",
         r"C:\Program Files (x86)\nodejs",
-        # VS Code (for code CLI)
+        # VS Code
         r"C:\Program Files\Microsoft VS Code\bin",
         # Java
         r"C:\Program Files\Java\jdk-21\bin",
         r"C:\Program Files\Java\jdk-17\bin",
-        # Rust
-        os.path.join(os.environ.get("USERPROFILE", ""), ".cargo", "bin"),
         # Go
         r"C:\Program Files\Go\bin",
+        # Rust
+        r"C:\Users\*\.cargo\bin",
         # CUDA
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin",
         r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.0\bin",
         r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8\bin",
-        # npm global
-        os.path.join(os.environ.get("APPDATA", ""), "npm"),
+        # Conda / Miniconda / Anaconda
+        r"C:\ProgramData\miniconda3",
+        r"C:\ProgramData\miniconda3\Scripts",
+        r"C:\ProgramData\miniconda3\condabin",
+        r"C:\ProgramData\Anaconda3",
+        r"C:\ProgramData\Anaconda3\Scripts",
+        r"C:\ProgramData\Anaconda3\condabin",
     ]
 
-    # Also scan for Python in Users directories (per-user installs)
+    import glob
+    found = []
+    seen = set()
+
+    # Expand wildcards and check existence
+    for candidate in candidates:
+        if "*" in candidate:
+            for expanded in glob.glob(candidate):
+                if os.path.isdir(expanded):
+                    norm = expanded.rstrip("\\").lower()
+                    if norm not in seen:
+                        found.append(expanded)
+                        seen.add(norm)
+        elif os.path.isdir(candidate):
+            norm = candidate.rstrip("\\").lower()
+            if norm not in seen:
+                found.append(candidate)
+                seen.add(norm)
+
+    # Scan for per-user Python installs (AppData\Local\Programs\Python)
     users_dir = r"C:\Users"
     if os.path.isdir(users_dir):
         for user_dir in os.listdir(users_dir):
-            local_programs = os.path.join(
-                users_dir, user_dir, "AppData", "Local", "Programs", "Python"
-            )
-            if os.path.isdir(local_programs):
-                for py_ver in os.listdir(local_programs):
-                    py_path = os.path.join(local_programs, py_ver)
-                    if os.path.isdir(py_path):
-                        tool_dirs.append(py_path)
-                        scripts = os.path.join(py_path, "Scripts")
-                        if os.path.isdir(scripts):
-                            tool_dirs.append(scripts)
+            for base in [
+                os.path.join(users_dir, user_dir, "AppData", "Local", "Programs", "Python"),
+                os.path.join(users_dir, user_dir, "miniconda3"),
+                os.path.join(users_dir, user_dir, "Anaconda3"),
+            ]:
+                if os.path.isdir(base):
+                    # Add the base and common subdirs
+                    for sub in ["", "Scripts", "condabin"]:
+                        d = os.path.join(base, sub) if sub else base
+                        if os.path.isdir(d):
+                            norm = d.rstrip("\\").lower()
+                            if norm not in seen:
+                                found.append(d)
+                                seen.add(norm)
+                    # For Python, check version subdirectories
+                    if "Python" in base:
+                        for py_ver in os.listdir(base):
+                            py_path = os.path.join(base, py_ver)
+                            if os.path.isdir(py_path):
+                                for sub in ["", "Scripts"]:
+                                    d = os.path.join(py_path, sub) if sub else py_path
+                                    if os.path.isdir(d):
+                                        norm = d.rstrip("\\").lower()
+                                        if norm not in seen:
+                                            found.append(d)
+                                            seen.add(norm)
 
-    try:
-        result = run_command(
-            'reg query "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager'
-            '\\Environment" /v Path',
-            description="read system PATH",
-            check=False,
-        )
-        if result.returncode != 0:
-            return
+    # Scan for npm global modules
+    for user_dir in (os.listdir(users_dir) if os.path.isdir(users_dir) else []):
+        npm_dir = os.path.join(users_dir, user_dir, "AppData", "Roaming", "npm")
+        if os.path.isdir(npm_dir):
+            norm = npm_dir.rstrip("\\").lower()
+            if norm not in seen:
+                found.append(npm_dir)
+                seen.add(norm)
 
-        current_path = ""
-        for line in result.stdout.splitlines():
-            if "REG_" in line and "Path" in line:
-                current_path = line.split("REG_EXPAND_SZ")[-1].strip()
-                if not current_path:
-                    current_path = line.split("REG_SZ")[-1].strip()
-                break
-
-        path_entries = [p.strip().rstrip("\\").lower() for p in current_path.split(";") if p.strip()]
-        added = []
-
-        for tool_dir in tool_dirs:
-            if not tool_dir or not os.path.isdir(tool_dir):
-                continue
-            if tool_dir.rstrip("\\").lower() not in path_entries:
-                added.append(tool_dir)
-                path_entries.append(tool_dir.rstrip("\\").lower())
-
-        if not added:
-            logger.info("All detected tool paths already in system PATH.")
-            return
-
-        new_path = current_path.rstrip(";") + ";" + ";".join(added)
-        run_command(
-            f'setx /M Path "{new_path}"',
-            description="update system PATH with tool directories",
-            check=False,
-        )
-        logger.info("Added to system PATH: %s", ", ".join(added))
-        for p in added:
-            print(f"    + Added to PATH: {p}")
-
-    except Exception as exc:
-        logger.warning("Could not configure system PATH: %s", exc)
+    return found
 
 
 def windows_create_guest_user():
@@ -704,14 +711,29 @@ def _windows_set_default_shell():
     except Exception as exc:
         logger.warning("Could not set default SSH shell: %s", exc)
 
-    # Create a system-wide PowerShell profile that sends the guest to X:\
+    # Create a system-wide PowerShell profile that:
+    # 1. Adds discovered tool paths to the guest's PATH
+    # 2. Sets the working directory to X:\
     profile_dir = r"C:\Windows\System32\WindowsPowerShell\v1.0"
     profile_path = os.path.join(profile_dir, "profile.ps1")
     sandbox_dir = WINDOWS_MOUNT_DRIVE + "\\"
 
+    # Scan for installed dev tools
+    tool_paths = _windows_scan_tool_paths()
+    path_lines = ""
+    if tool_paths:
+        escaped = ";".join(tool_paths)
+        path_lines = (
+            f"    # Add developer tools to PATH\n"
+            f"    $env:Path = '{escaped};' + $env:Path\n"
+        )
+        for p in tool_paths:
+            print(f"    + Found tool: {p}")
+
     profile_block = (
-        f"\n# --- Wiz Island Guest Redirect ---\n"
+        f"\n# --- Wiz Island Guest Environment ---\n"
         f"if ($env:USERNAME -eq '{WINDOWS_GUEST_USER}') {{\n"
+        f"{path_lines}"
         f"    if (Test-Path '{sandbox_dir}') {{\n"
         f"        Set-Location '{sandbox_dir}'\n"
         f"    }}\n"
@@ -725,38 +747,43 @@ def _windows_set_default_shell():
             with open(profile_path, "r") as f:
                 existing = f.read()
 
-        if "Wiz Island Guest Redirect" in existing:
-            logger.info("PowerShell profile redirect already configured.")
-            return
+        # Remove any previous Wiz Island profile block
+        if "Wiz Island Guest" in existing:
+            start_marker = "# --- Wiz Island Guest"
+            end_marker = "# --- End Wiz Island ---"
+            start_idx = existing.find(start_marker)
+            end_idx = existing.find(end_marker)
+            if start_idx >= 0 and end_idx >= 0:
+                existing = (
+                    existing[:start_idx].rstrip()
+                    + existing[end_idx + len(end_marker):]
+                )
 
-        with open(profile_path, "a") as f:
-            f.write(profile_block)
-        logger.info("Added guest redirect to PowerShell profile: %s", profile_path)
+        with open(profile_path, "w") as f:
+            f.write(existing.rstrip() + profile_block)
+        logger.info("Configured guest PowerShell profile: %s", profile_path)
     except Exception as exc:
         logger.warning("Could not configure PowerShell profile: %s", exc)
 
 
 def windows_setup_storage(size_gb):
     """Full Windows storage setup pipeline."""
-    print(f"  [1/7] Creating {size_gb} GB VHDX virtual disk...")
+    print(f"  [1/6] Creating {size_gb} GB VHDX virtual disk...")
     windows_create_vhdx(size_gb)
 
-    print(f"  [2/7] Creating guest user '{WINDOWS_GUEST_USER}'...")
+    print(f"  [2/6] Creating guest user '{WINDOWS_GUEST_USER}'...")
     windows_create_guest_user()
 
-    print(f"  [3/7] Setting permissions on {WINDOWS_MOUNT_DRIVE}...")
+    print(f"  [3/6] Setting permissions on {WINDOWS_MOUNT_DRIVE}...")
     windows_set_permissions()
 
-    print("  [4/7] Configuring SSH jail...")
+    print("  [4/6] Configuring SSH jail...")
     windows_configure_ssh_jail()
 
-    print("  [5/7] Setting default shell to PowerShell...")
+    print("  [5/6] Configuring shell, PATH & developer tools...")
     _windows_set_default_shell()
 
-    print("  [6/7] Configuring developer tools PATH...")
-    _windows_configure_guest_path()
-
-    print("  [7/7] Configuring firewall...")
+    print("  [6/6] Configuring firewall...")
     windows_configure_firewall()
 
     print("  Storage setup complete.")
@@ -836,21 +863,29 @@ def windows_teardown():
     except Exception as exc:
         logger.warning("Could not clean sshd_config: %s", exc)
 
-    # Remove PowerShell profile redirect
+    # Remove PowerShell profile block
     try:
         profile_path = r"C:\Windows\System32\WindowsPowerShell\v1.0\profile.ps1"
         if os.path.exists(profile_path):
             with open(profile_path, "r") as f:
                 content = f.read()
-            start_marker = "# --- Wiz Island Guest Redirect ---"
-            end_marker = "# --- End Wiz Island ---"
-            if start_marker in content:
-                before = content[:content.index(start_marker)]
-                after_idx = content.find(end_marker)
-                after = content[after_idx + len(end_marker):] if after_idx >= 0 else ""
-                with open(profile_path, "w") as f:
-                    f.write(before.rstrip() + after)
-                logger.info("Removed guest redirect from PowerShell profile.")
+            # Match both old and new marker names
+            for start_marker in [
+                "# --- Wiz Island Guest Environment ---",
+                "# --- Wiz Island Guest Redirect ---",
+            ]:
+                end_marker = "# --- End Wiz Island ---"
+                if start_marker in content:
+                    start_idx = content.index(start_marker)
+                    end_idx = content.find(end_marker)
+                    if end_idx >= 0:
+                        content = (
+                            content[:start_idx].rstrip()
+                            + content[end_idx + len(end_marker):]
+                        )
+            with open(profile_path, "w") as f:
+                f.write(content.strip() + "\n" if content.strip() else "")
+            logger.info("Removed guest environment from PowerShell profile.")
     except Exception as exc:
         logger.warning("Could not clean PowerShell profile: %s", exc)
 
