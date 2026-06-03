@@ -290,9 +290,11 @@ def windows_create_vhdx(size_gb):
 def _windows_grant_vscode_permissions():
     """Grant the guest user permissions needed for VS Code Remote-SSH.
 
-    VS Code's install script runs Get-CimInstance win32_process to detect
-    the platform. Standard users lack WMI access, causing the installation
-    to fail. Adding the user to these groups resolves the issue.
+    VS Code's server bootstrap runs `Get-CimInstance Win32_Process` to
+    detect the platform/parent process. A standard user is denied WMI
+    access to root\\cimv2 (HRESULT 0x80041003), which aborts the install
+    with "$PLATFORM is undefined". Group membership alone is NOT enough;
+    we must grant explicit permissions on the WMI namespace itself.
     """
     groups = [
         "Performance Monitor Users",
@@ -307,6 +309,77 @@ def _windows_grant_vscode_permissions():
             )
         except Exception as exc:
             logger.warning("Could not add to %s: %s", group, exc)
+
+    _windows_grant_wmi_access()
+
+
+def _windows_grant_wmi_access():
+    """Grant the guest user read/execute access to the root\\cimv2 WMI namespace.
+
+    This is required for VS Code Remote-SSH: its install script enumerates
+    Win32_Process via CIM. We modify the namespace security descriptor to
+    add an inherited ACE granting Enable Account, Execute Methods, Remote
+    Enable, and Read Security to the guest's SID.
+    """
+    vhdx_dir = os.path.dirname(WINDOWS_VHDX_PATH)
+    try:
+        os.makedirs(vhdx_dir, exist_ok=True)
+    except OSError:
+        vhdx_dir = os.environ.get("TEMP", r"C:\Windows\Temp")
+
+    script_path = os.path.join(vhdx_dir, "grant_wmi.ps1")
+    # Permission mask: Enable(1) | MethodExecute(2) | RemoteEnable(0x20)
+    #                  | ReadSecurity(0x20000)
+    ps_script = f"""
+$ErrorActionPreference = 'Stop'
+$account = '{WINDOWS_GUEST_USER}'
+foreach ($namespace in @('root/cimv2','root')) {{
+  try {{
+    $accessMask = 1 -bor 2 -bor 0x20 -bor 0x20000
+    $ntAccount = New-Object System.Security.Principal.NTAccount($account)
+    $sid = $ntAccount.Translate([System.Security.Principal.SecurityIdentifier]).Value
+
+    $sd = Invoke-WmiMethod -Namespace $namespace -Path "__systemsecurity=@" -Name GetSecurityDescriptor
+    if ($sd.ReturnValue -ne 0) {{ throw "GetSecurityDescriptor failed ($($sd.ReturnValue))" }}
+    $acl = $sd.Descriptor
+
+    $CONTAINER_INHERIT_ACE_FLAG = 0x2
+    $ACCESS_ALLOWED_ACE_TYPE = 0x0
+
+    $ace = (New-Object System.Management.ManagementClass("win32_Ace")).CreateInstance()
+    $ace.AccessMask = $accessMask
+    $ace.AceFlags = $CONTAINER_INHERIT_ACE_FLAG
+    $trustee = (New-Object System.Management.ManagementClass("win32_Trustee")).CreateInstance()
+    $trustee.SidString = $sid
+    $ace.Trustee = $trustee
+    $ace.AceType = $ACCESS_ALLOWED_ACE_TYPE
+
+    $acl.DACL += $ace.psobject.immediateBaseObject
+
+    $set = Invoke-WmiMethod -Namespace $namespace -Path "__systemsecurity=@" -Name SetSecurityDescriptor -ArgumentList $acl
+    if ($set.ReturnValue -ne 0) {{ throw "SetSecurityDescriptor failed ($($set.ReturnValue))" }}
+    Write-Output "WMI access granted on $namespace for $account"
+  }} catch {{
+    Write-Output "WMI grant skipped on $namespace : $($_.Exception.Message)"
+  }}
+}}
+"""
+    try:
+        with open(script_path, "w") as f:
+            f.write(ps_script)
+        run_command(
+            f'powershell -NoProfile -ExecutionPolicy Bypass -File "{script_path}"',
+            description="grant guest WMI access to root/cimv2",
+            check=False,
+        )
+        logger.info("Granted WMI namespace access to %s.", WINDOWS_GUEST_USER)
+    except Exception as exc:
+        logger.warning("Could not grant WMI access: %s", exc)
+    finally:
+        try:
+            os.remove(script_path)
+        except OSError:
+            pass
 
 
 def _windows_scan_tool_paths():
