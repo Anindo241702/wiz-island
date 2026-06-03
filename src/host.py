@@ -8,12 +8,16 @@ and host-mode lifecycle management.
 import logging
 import os
 import platform
+import random
 import re
 import signal
+import string
 import subprocess
 import sys
 import threading
 import time
+import urllib.request
+import urllib.error
 
 import psutil
 
@@ -27,7 +31,33 @@ _tunnel_url = None
 _running = False
 _start_time = None
 _max_coders = 0
+_room_code = None
 _lock = threading.Lock()
+
+
+def _generate_room_code():
+    """Generate a short random room code for ntfy.sh coordination."""
+    chars = string.ascii_lowercase + string.digits
+    return "wiz-" + "".join(random.choices(chars, k=6))
+
+
+def _publish_tunnel_url(url):
+    """Publish the current tunnel URL to ntfy.sh so clients can auto-discover it."""
+    global _room_code
+    if not _room_code:
+        return
+    try:
+        topic = f"https://ntfy.sh/{_room_code}"
+        req = urllib.request.Request(
+            topic,
+            data=url.encode("utf-8"),
+            headers={"Title": "WizIsland Tunnel URL"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=10)
+        logger.info("Published tunnel URL to ntfy.sh/%s", _room_code)
+    except Exception as exc:
+        logger.warning("Could not publish to ntfy.sh: %s", exc)
 
 
 def clear_screen():
@@ -200,6 +230,7 @@ def start_pinggy_tunnel():
             if match:
                 _tunnel_url = match.group(1)
                 logger.info("Pinggy tunnel established: %s", _tunnel_url)
+                _publish_tunnel_url(_tunnel_url)
                 return _tunnel_url
 
         if _tunnel_process.poll() is not None:
@@ -211,6 +242,7 @@ def start_pinggy_tunnel():
                 if match:
                     _tunnel_url = match.group(1)
                     logger.info("Pinggy tunnel established: %s", _tunnel_url)
+                    _publish_tunnel_url(_tunnel_url)
                     return _tunnel_url
 
             all_output = "\n".join(collected_output)
@@ -462,6 +494,7 @@ def render_dashboard():
                 pad("  ============================================================"),
                 pad(""),
                 pad(f"   TUNNEL STATUS    : {tunnel_stat}"),
+                pad(f"   ROOM CODE        : {_room_code or 'N/A'}  (share this once)"),
                 pad(f"   TUNNEL URL       : {tunnel_display}"),
                 pad(f"   SSH Command      : ssh {guest_user}@{ssh_host} -p {ssh_port}"),
                 pad(f"   Guest Password   : {guest_pass}"),
@@ -635,7 +668,7 @@ def _signal_handler(signum, frame):
 
 def run_host_mode():
     """Main entry point for Host Mode."""
-    global _running, _max_coders
+    global _running, _max_coders, _room_code
 
     # Install signal handlers
     signal.signal(signal.SIGINT, _signal_handler)
@@ -681,6 +714,9 @@ def run_host_mode():
         _max_coders = 0
         print("  No limit — unlimited coders can connect.")
 
+    # Generate a room code for automatic tunnel URL discovery via ntfy.sh
+    _room_code = _generate_room_code()
+
     # Step 1: Storage quota
     size_gb = prompt_storage_quota()
     if size_gb is None:
@@ -709,6 +745,9 @@ def run_host_mode():
     print("  ============================================================")
     print("   TUNNEL ESTABLISHED - SHARE THESE WITH YOUR GUEST")
     print("  ============================================================")
+    print(f"   ROOM CODE      : {_room_code}")
+    print("     ^ Share this ONCE. Guest enters it in User Mode and stays")
+    print("       connected automatically across tunnel reconnects.")
     print(f"   Tunnel URL     : {tunnel_url}")
     print(f"   SSH Command    : ssh {guest_user}@"
           f"{tunnel_url.replace('tcp://', '').split(':')[0]} "

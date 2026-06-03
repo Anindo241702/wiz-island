@@ -1,6 +1,6 @@
 # Wiz Island
 
-**Serverless Peer-to-Peer SSH Tunneling Tool** | v1.2.0
+**Serverless Peer-to-Peer SSH Tunneling Tool** | v1.3.0
 
 Wiz Island is a CLI tool written in Python that allows a client to connect securely to a Host machine's CPU/GPU/RAM/Storage over an SSH tunnel via Pinggy. The tool configures everything automatically on both Windows and Debian-based Linux (Ubuntu/Kali). No accounts or API keys required.
 
@@ -92,6 +92,8 @@ python src/main.py --mode terminate    # Skip menu, run cleanup
 | Random Passwords | Secure passwords generated fresh each session |
 | Real-Time Dashboard | Live CPU, RAM, disk, network metrics via psutil |
 | Connection Testing | Client tests TCP connectivity before saving config |
+| Auto-Reconnect | Host auto-restarts the tunnel when Pinggy expires it (~60 min) |
+| Room Code Auto-Discovery | Share a room code once; client auto-updates its SSH config on every reconnect via ntfy.sh (no account) |
 | Panic Button | Instant full cleanup with one keypress |
 | Signal Handling | Graceful shutdown on Ctrl+C / SIGTERM |
 | Firewall Config | Automatic SSH port 22 firewall rules |

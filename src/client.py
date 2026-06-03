@@ -12,8 +12,84 @@ import os
 import platform
 import re
 import socket
+import time
+import urllib.request
+import urllib.error
 
 logger = logging.getLogger("wiz_island.client")
+
+
+def fetch_room_url(room_code, timeout=10):
+    """Fetch the latest tunnel URL published by the Host to ntfy.sh.
+
+    Returns the most recent message body (the tunnel URL) or None if
+    no message is available yet.
+    """
+    room_code = room_code.strip()
+    url = f"https://ntfy.sh/{room_code}/raw?poll=1"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "WizIsland"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+    except (urllib.error.URLError, OSError) as exc:
+        logger.debug("ntfy poll failed: %s", exc)
+        return None
+
+    # raw endpoint returns one message per line; blank lines are keepalives
+    latest = None
+    for line in body.splitlines():
+        line = line.strip()
+        if line:
+            latest = line
+    return latest
+
+
+def watch_room_code(room_code, username, host_platform, alias="WizIsland",
+                    interval=15):
+    """Foreground loop: poll ntfy.sh and auto-update SSH config on changes.
+
+    Keeps running until interrupted. Every time the Host publishes a new
+    tunnel URL (e.g. after a 60-minute Pinggy reconnect), the SSH config
+    is updated automatically so the coder never has to re-enter a URL.
+    """
+    current_host = None
+    current_port = None
+
+    print("\n  ============================================================")
+    print("   WIZ ISLAND - AUTO-CONNECT WATCHER")
+    print("  ============================================================")
+    print(f"   Room Code : {room_code}")
+    print(f"   Alias     : {alias}")
+    print()
+    print("   Watching for the Host's tunnel URL. Keep this window open —")
+    print("   it auto-updates your SSH config whenever the Host reconnects.")
+    print("   Connect via 'ssh WizIsland' or VS Code in another window.")
+    print("   Press Ctrl+C to stop watching.")
+    print("  ============================================================")
+    print()
+
+    try:
+        while True:
+            url = fetch_room_url(room_code)
+            if url:
+                host, port = parse_tunnel_url(url)
+                if host and port and (host != current_host or port != current_port):
+                    try:
+                        update_ssh_config(host, port, username=username,
+                                          alias=alias)
+                        current_host, current_port = host, port
+                        stamp = time.strftime("%H:%M:%S")
+                        print(f"  [{stamp}] Tunnel URL updated -> {host}:{port}")
+                        print(f"            SSH config refreshed. Reconnect if "
+                              f"your session dropped.")
+                    except Exception as exc:
+                        logger.error("Failed to update SSH config: %s", exc)
+                        print(f"  [ERROR] Could not update SSH config: {exc}")
+            else:
+                logger.debug("No tunnel URL published yet for %s", room_code)
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print("\n  Stopped watching. Your SSH config keeps the last known URL.")
 
 
 def get_ssh_config_path():
@@ -323,31 +399,125 @@ def print_connection_instructions(host, port, config_path, username="wizguest",
     print("\n".join(lines))
 
 
+def _prompt_host_platform_and_user():
+    """Shared prompt for host OS and guest username/password."""
+    print("\n  What OS is the Host running?")
+    print("    [1] Windows (default)")
+    print("    [2] Linux")
+    try:
+        os_choice = input("  Select [1-2]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        os_choice = "1"
+    if os_choice == "2":
+        host_platform = "linux"
+        default_username = "wizguest"
+    else:
+        host_platform = "windows"
+        default_username = "WizGuest"
+
+    try:
+        user_choice = input(
+            f"\n  Guest username [{default_username}]: "
+        ).strip()
+        username = user_choice if user_choice else default_username
+    except (EOFError, KeyboardInterrupt):
+        username = default_username
+
+    password = None
+    try:
+        password = input(
+            "  Guest password (press Enter to skip): "
+        ).strip()
+        if not password:
+            password = None
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+    return host_platform, username, password
+
+
+def run_room_code_mode():
+    """Connect using a room code with automatic tunnel URL discovery."""
+    print("\n  Enter the ROOM CODE shown on the Host's dashboard.")
+    print("  (Looks like: wiz-x7k9m2)")
+    try:
+        room_code = input("\n  Room code: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return
+
+    if not room_code:
+        print("  [ERROR] Room code cannot be empty.")
+        input("  Press Enter to return to the menu...")
+        return
+
+    host_platform, username, password = _prompt_host_platform_and_user()
+
+    # Initial fetch so the user gets connected right away
+    print(f"\n  Looking up the current tunnel URL for '{room_code}'...")
+    url = fetch_room_url(room_code)
+    if not url:
+        print("  No tunnel URL published yet. The watcher will keep trying.")
+        print("  Make sure the Host is running and shares this exact room code.")
+    else:
+        host, port = parse_tunnel_url(url)
+        if host and port:
+            try:
+                config_path = update_ssh_config(host, port, username=username)
+                print(f"  Connected! SSH config set to {host}:{port}")
+            except Exception as exc:
+                print(f"  [ERROR] Failed to update SSH config: {exc}")
+                input("  Press Enter to return to the menu...")
+                return
+
+            print("  Configuring VS Code Remote-SSH platform...")
+            if configure_vscode_remote_platform("WizIsland", host_platform):
+                print(f"  VS Code platform set to: {host_platform}")
+
+            print_connection_instructions(
+                host, port, config_path, username=username,
+                reachable=test_connection(host, port), password=password,
+            )
+        else:
+            print(f"  [WARNING] Could not parse published URL: {url}")
+
+    # Make sure VS Code platform is set even if first fetch failed
+    configure_vscode_remote_platform("WizIsland", host_platform)
+
+    # Start the foreground watcher (auto-updates on every reconnect)
+    watch_room_code(room_code, username, host_platform)
+    input("\n  Press Enter to return to the menu...")
+
+
 def run_user_mode():
     """Main entry point for User Mode (client)."""
     print("\n  ============================================================")
     print("   WIZ ISLAND - USER MODE (CLIENT)")
     print("  ============================================================")
     print()
-    print("   [1]  Connect to a Host")
-    print("   [2]  Clean/Remove WizIsland SSH Config")
+    print("   [1]  Connect via Room Code (auto-reconnect, recommended)")
+    print("   [2]  Connect via Tunnel URL (manual, one-time)")
+    print("   [3]  Clean/Remove WizIsland SSH Config")
     print("   [0]  Back to Main Menu")
     print()
 
     try:
-        choice = input("   Select an option [0-2]: ").strip()
+        choice = input("   Select an option [0-3]: ").strip()
     except (EOFError, KeyboardInterrupt):
         return
 
     if choice == "0":
         return
 
-    if choice == "2":
+    if choice == "3":
         remove_ssh_config()
         input("\n  Press Enter to return to the menu...")
         return
 
-    if choice != "1":
+    if choice == "1":
+        run_room_code_mode()
+        return
+
+    if choice != "2":
         print("  Invalid choice.")
         input("  Press Enter to return to the menu...")
         return
