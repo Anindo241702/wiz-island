@@ -602,8 +602,13 @@ def kill_guest_sessions():
         logger.warning("Could not kill guest sessions: %s", exc)
 
 
-def panic_shutdown():
-    """Execute the full panic shutdown sequence."""
+def panic_shutdown(wipe_data=False):
+    """Execute the full panic shutdown sequence.
+
+    By default sandbox data is preserved (disk detached but kept) so the
+    user's files survive. Pass wipe_data=True to permanently delete the
+    sandbox disk and everything in it.
+    """
     global _running
     _running = False
 
@@ -621,9 +626,12 @@ def panic_shutdown():
     kill_guest_sessions()
     print("         Done.")
 
-    print("  [3/4] Unmounting virtual disks and removing guest accounts...")
+    if wipe_data:
+        print("  [3/4] Wiping sandbox and removing guest accounts...")
+    else:
+        print("  [3/4] Detaching sandbox (data preserved) and removing guest accounts...")
     try:
-        storage.teardown_storage()
+        storage.teardown_storage(wipe_data=wipe_data)
     except Exception as exc:
         logger.error("Teardown error: %s", exc)
         print(f"  [WARNING] Partial teardown: {exc}")

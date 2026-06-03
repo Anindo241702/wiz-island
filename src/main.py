@@ -53,6 +53,51 @@ logger = logging.getLogger("wiz_island.main")
 
 
 # ============================================================
+#  TERMINAL UI / COLORS
+# ============================================================
+
+def _supports_color():
+    """Enable ANSI colors where possible; return True if usable."""
+    if not sys.stdout.isatty():
+        return False
+    if platform.system() == "Windows":
+        # Enable VT100 processing on Windows 10+ consoles
+        try:
+            kernel32 = ctypes.windll.kernel32
+            # -11 = STD_OUTPUT_HANDLE, 0x0004 = ENABLE_VIRTUAL_TERMINAL_PROCESSING
+            handle = kernel32.GetStdHandle(-11)
+            mode = ctypes.c_uint32()
+            if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                return False
+            kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+            return True
+        except Exception:
+            return False
+    return True
+
+
+_COLOR = _supports_color()
+
+
+class C:
+    """ANSI color codes (empty strings when color is unsupported)."""
+    RESET = "\033[0m" if _COLOR else ""
+    BOLD = "\033[1m" if _COLOR else ""
+    DIM = "\033[2m" if _COLOR else ""
+    CYAN = "\033[96m" if _COLOR else ""
+    BLUE = "\033[94m" if _COLOR else ""
+    GREEN = "\033[92m" if _COLOR else ""
+    YELLOW = "\033[93m" if _COLOR else ""
+    RED = "\033[91m" if _COLOR else ""
+    MAGENTA = "\033[95m" if _COLOR else ""
+
+
+def colorize(text, color):
+    """Wrap text in a color code with reset."""
+    return f"{color}{text}{C.RESET}"
+
+
+# ============================================================
 #  PRIVILEGE CHECKS
 # ============================================================
 
@@ -94,35 +139,15 @@ def warn_if_not_admin():
 #  BANNER & UI HELPERS
 # ============================================================
 
-BANNER = r"""
-  ============================================================
-
+BANNER_ART = r"""
    __        ___       ___     _                 _
    \ \      / (_)__   |_ _|__| | __ _ _ __   __| |
     \ \ /\ / /| |_ /   | |/ _` |/ _` | '_ \ / _` |
      \ V  V / | |/ /    | | (_| | (_| | | | | (_| |
       \_/\_/  |_/___|  |___\__,_|\__,_|_| |_|\__,_|
-
-   Serverless P2P SSH Tunneling Tool  v{version}
-   Platform: {platform}
-   Privileges: {privileges}
-
-  ============================================================
 """
 
-MENU = """
-  ------------------------------------------------------------
-   MAIN MENU
-  ------------------------------------------------------------
-
-   [1]  HOST MODE     - Share your machine's resources
-   [2]  USER MODE     - Connect to a remote host
-   [3]  TERMINATE     - Panic button / Full cleanup
-
-   [0]  EXIT
-
-  ------------------------------------------------------------
-"""
+_TOP = "  +" + "-" * 58 + "+"
 
 
 def clear_screen():
@@ -133,23 +158,48 @@ def clear_screen():
 def print_banner():
     """Display the application banner."""
     plat_name = f"{platform.system()} {platform.release()}"
-    priv = "Administrator" if is_admin() else "Standard User"
-    print(BANNER.format(version=__version__, platform=plat_name, privileges=priv))
+    is_adm = is_admin()
+    priv = "Administrator" if is_adm else "Standard User"
+    priv_color = C.GREEN if is_adm else C.YELLOW
+
+    print()
+    print(colorize(_TOP, C.CYAN))
+    print(colorize(BANNER_ART.strip("\n"), C.BOLD + C.CYAN))
+    print()
+    print("   " + colorize("Serverless P2P SSH Tunneling Tool", C.BOLD)
+          + "  " + colorize(f"v{__version__}", C.MAGENTA))
+    print("   " + colorize("Platform   : ", C.DIM) + plat_name)
+    print("   " + colorize("Privileges : ", C.DIM) + colorize(priv, priv_color))
+    print(colorize(_TOP, C.CYAN))
 
 
 def print_menu():
     """Display the main menu."""
-    print(MENU)
+    print()
+    print("   " + colorize("MAIN MENU", C.BOLD + C.BLUE))
+    print(colorize("  " + "-" * 58, C.DIM))
+    print()
+    print("   " + colorize("[1]", C.GREEN) + "  "
+          + colorize("HOST MODE", C.BOLD) + "   - Share your machine's resources")
+    print("   " + colorize("[2]", C.GREEN) + "  "
+          + colorize("USER MODE", C.BOLD) + "   - Connect to a remote host")
+    print("   " + colorize("[3]", C.YELLOW) + "  "
+          + colorize("TERMINATE", C.BOLD) + "   - Panic button / Full cleanup")
+    print()
+    print("   " + colorize("[0]", C.RED) + "  "
+          + colorize("EXIT", C.BOLD))
+    print()
+    print(colorize("  " + "-" * 58, C.DIM))
 
 
 def get_choice():
     """Get a valid menu choice from the user."""
     while True:
         try:
-            choice = input("   Select an option [0-3]: ").strip()
+            choice = input("\n   " + colorize("Select an option [0-3]: ", C.BOLD + C.CYAN)).strip()
             if choice in ("0", "1", "2", "3"):
                 return choice
-            print("   Invalid choice. Please enter 0, 1, 2, or 3.")
+            print(colorize("   Invalid choice. Please enter 0, 1, 2, or 3.", C.RED))
         except (EOFError, KeyboardInterrupt):
             print("\n   Exiting Wiz Island...")
             sys.exit(0)
@@ -268,14 +318,20 @@ def main():
             print("   This will:")
             print("   - Stop the tunnel")
             print("   - Kill all guest SSH sessions")
-            print("   - Unmount virtual disks")
+            print("   - Unmount the virtual disk (data is KEPT by default)")
             print("   - Delete guest user accounts")
             print("   - Restore machine to native state")
             print()
             confirm = input("  Are you sure you want to terminate? (yes/no): ").strip().lower()
             if confirm in ("yes", "y"):
+                wipe_confirm = input(
+                    "  Also PERMANENTLY DELETE all sandbox data? (yes/no, default no): "
+                ).strip().lower()
+                wipe_data = wipe_confirm in ("yes", "y")
+                if not wipe_data:
+                    print("  Sandbox data will be preserved for next time.")
                 try:
-                    host.panic_shutdown()
+                    host.panic_shutdown(wipe_data=wipe_data)
                 except Exception as exc:
                     logger.exception("Panic shutdown error: %s", exc)
                     print(f"\n  [ERROR] Shutdown error: {exc}")

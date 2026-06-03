@@ -529,19 +529,27 @@ def windows_create_guest_user():
 
 
 def windows_set_permissions():
-    """Restrict X:\\ access so only WizGuest can use it."""
+    """Restrict X:\\ access so only WizGuest can use it.
+
+    Uses /T so the grants apply recursively to all EXISTING files too.
+    This matters when reusing a sandbox: the guest user is recreated with
+    a new SID, and without /T the old files stay inaccessible (the cause
+    of "Access denied" when uploading/editing through VS Code or SCP).
+    """
     try:
         run_command(
             f'icacls {WINDOWS_MOUNT_DRIVE}\\ /inheritance:r',
             description="icacls remove inheritance",
         )
         run_command(
-            f'icacls {WINDOWS_MOUNT_DRIVE}\\ /grant {WINDOWS_GUEST_USER}:(OI)(CI)F',
-            description="icacls grant WizGuest full control",
+            f'icacls {WINDOWS_MOUNT_DRIVE}\\ '
+            f'/grant {WINDOWS_GUEST_USER}:(OI)(CI)F /T /C /Q',
+            description="icacls grant WizGuest full control (recursive)",
         )
         run_command(
-            f'icacls {WINDOWS_MOUNT_DRIVE}\\ /grant Administrators:(OI)(CI)F',
-            description="icacls grant Administrators full control",
+            f'icacls {WINDOWS_MOUNT_DRIVE}\\ '
+            f'/grant Administrators:(OI)(CI)F /T /C /Q',
+            description="icacls grant Administrators full control (recursive)",
         )
         logger.info("Permissions set on %s for %s.", WINDOWS_MOUNT_DRIVE, WINDOWS_GUEST_USER)
     except Exception as exc:
@@ -787,6 +795,7 @@ def _windows_set_default_shell():
     profile_block = f"""
 # --- Wiz Island Guest Environment ---
 if ($env:USERNAME -eq '{WINDOWS_GUEST_USER}') {{
+  try {{
     $ErrorActionPreference = 'SilentlyContinue'
 
     # Dynamically discover dev tools and add to PATH
@@ -858,12 +867,12 @@ if ($env:USERNAME -eq '{WINDOWS_GUEST_USER}') {{
         }}
     }}
 
-    $ErrorActionPreference = 'Continue'
-
     # Set working directory to sandbox
     if (Test-Path '{sandbox_dir}') {{
         Set-Location '{sandbox_dir}'
     }}
+  }} catch {{ }}
+  $ErrorActionPreference = 'Continue'
 }}
 # --- End Wiz Island ---
 """
@@ -923,11 +932,16 @@ def windows_setup_storage(size_gb):
 #  WINDOWS TEARDOWN OPERATIONS
 # ============================================================
 
-def windows_teardown():
-    """Remove virtual disk, guest user, and SSH jail config on Windows."""
+def windows_teardown(wipe_data=False):
+    """Remove guest user and SSH jail config on Windows.
+
+    By default the VHDX file is PRESERVED (only detached) so the sandbox
+    data survives across restarts. Pass wipe_data=True to permanently
+    delete the sandbox disk and all files in it.
+    """
     print("  [*] Tearing down Windows sandbox...")
 
-    # Detach VHDX
+    # Detach VHDX (data on disk is preserved unless wipe_data=True)
     try:
         vhdx_dir = os.path.dirname(WINDOWS_VHDX_PATH)
         os.makedirs(vhdx_dir, exist_ok=True)
@@ -946,13 +960,18 @@ def windows_teardown():
     except Exception as exc:
         logger.warning("VHDX detach issue: %s", exc)
 
-    # Delete VHDX file
-    try:
+    # Delete VHDX file only when explicitly wiping data
+    if wipe_data:
+        try:
+            if os.path.exists(WINDOWS_VHDX_PATH):
+                os.remove(WINDOWS_VHDX_PATH)
+                logger.info("Deleted VHDX file: %s", WINDOWS_VHDX_PATH)
+        except OSError as exc:
+            logger.warning("Could not delete VHDX: %s", exc)
+    else:
         if os.path.exists(WINDOWS_VHDX_PATH):
-            os.remove(WINDOWS_VHDX_PATH)
-            logger.info("Deleted VHDX file: %s", WINDOWS_VHDX_PATH)
-    except OSError as exc:
-        logger.warning("Could not delete VHDX: %s", exc)
+            print(f"  [*] Sandbox data preserved at {WINDOWS_VHDX_PATH}")
+            logger.info("Preserved VHDX file: %s", WINDOWS_VHDX_PATH)
 
     # Delete guest user
     try:
@@ -1376,8 +1395,13 @@ def linux_setup_storage(size_gb):
 #  LINUX TEARDOWN OPERATIONS
 # ============================================================
 
-def linux_teardown():
-    """Remove disk image, guest user, and SSH jail config on Linux."""
+def linux_teardown(wipe_data=False):
+    """Remove guest user and SSH jail config on Linux.
+
+    By default the disk image is PRESERVED (only unmounted) so the
+    sandbox data survives across restarts. Pass wipe_data=True to
+    permanently delete the sandbox image and all files in it.
+    """
     print("  [*] Tearing down Linux sandbox...")
 
     # Kill any remaining processes by the guest user
@@ -1401,21 +1425,26 @@ def linux_teardown():
     except Exception as exc:
         logger.warning("Unmount issue: %s", exc)
 
-    # Delete image file
-    try:
-        if os.path.exists(LINUX_IMAGE_PATH):
-            os.remove(LINUX_IMAGE_PATH)
-            logger.info("Deleted image file: %s", LINUX_IMAGE_PATH)
-    except OSError as exc:
-        logger.warning("Could not delete image: %s", exc)
+    # Delete image file only when explicitly wiping data
+    if wipe_data:
+        try:
+            if os.path.exists(LINUX_IMAGE_PATH):
+                os.remove(LINUX_IMAGE_PATH)
+                logger.info("Deleted image file: %s", LINUX_IMAGE_PATH)
+        except OSError as exc:
+            logger.warning("Could not delete image: %s", exc)
 
-    # Remove mount directory
-    try:
-        if os.path.exists(LINUX_MOUNT_DIR):
-            shutil.rmtree(LINUX_MOUNT_DIR, ignore_errors=True)
-            logger.info("Removed mount directory: %s", LINUX_MOUNT_DIR)
-    except OSError as exc:
-        logger.warning("Could not remove mount dir: %s", exc)
+        # Remove mount directory
+        try:
+            if os.path.exists(LINUX_MOUNT_DIR):
+                shutil.rmtree(LINUX_MOUNT_DIR, ignore_errors=True)
+                logger.info("Removed mount directory: %s", LINUX_MOUNT_DIR)
+        except OSError as exc:
+            logger.warning("Could not remove mount dir: %s", exc)
+    else:
+        if os.path.exists(LINUX_IMAGE_PATH):
+            print(f"  [*] Sandbox data preserved at {LINUX_IMAGE_PATH}")
+            logger.info("Preserved image file: %s", LINUX_IMAGE_PATH)
 
     # Delete guest user
     try:
@@ -1459,10 +1488,15 @@ def setup_storage(size_gb):
     """
     if check_existing_setup():
         print("\n  [WARNING] Previous Wiz Island setup detected.")
+        print("  Reusing keeps all your existing sandbox files.")
         response = input("  Do you want to reuse the existing setup? (yes/no): ").strip().lower()
         if response not in ("yes", "y"):
+            confirm_wipe = input(
+                "  Start fresh — PERMANENTLY DELETE existing sandbox data? (yes/no): "
+            ).strip().lower()
+            wipe = confirm_wipe in ("yes", "y")
             print("  Cleaning up previous setup first...")
-            teardown_storage()
+            teardown_storage(wipe_data=wipe)
 
     plat = get_platform()
     if plat == "windows":
@@ -1472,13 +1506,17 @@ def setup_storage(size_gb):
     return True
 
 
-def teardown_storage():
-    """Tear down storage on the current platform."""
+def teardown_storage(wipe_data=False):
+    """Tear down storage on the current platform.
+
+    By default sandbox data is preserved (disk detached but kept). Pass
+    wipe_data=True to permanently delete the sandbox disk and its files.
+    """
     plat = get_platform()
     if plat == "windows":
-        windows_teardown()
+        windows_teardown(wipe_data=wipe_data)
     else:
-        linux_teardown()
+        linux_teardown(wipe_data=wipe_data)
     # Clear the session password
     global _guest_password
     _guest_password = None
