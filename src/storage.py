@@ -388,6 +388,85 @@ foreach ($namespace in @('root/cimv2','root')) {{
         except OSError:
             pass
 
+    _windows_verify_wmi_access()
+
+
+def _windows_verify_wmi_access():
+    """Verify the guest can actually query Win32_Process (what VS Code needs).
+
+    Logs in AS the guest using the known password and runs the exact CIM
+    query VS Code Remote-SSH uses. Prints a definitive PASS/FAIL so we
+    know whether the namespace grant took effect on this machine.
+    """
+    password = _get_or_create_password()
+    # Single quotes are safe: the password charset excludes the single quote.
+    pw_lit = password.replace("'", "''")
+
+    vhdx_dir = os.path.dirname(WINDOWS_VHDX_PATH)
+    try:
+        os.makedirs(vhdx_dir, exist_ok=True)
+    except OSError:
+        vhdx_dir = os.environ.get("TEMP", r"C:\Windows\Temp")
+    script_path = os.path.join(vhdx_dir, "verify_wmi.ps1")
+
+    # Inner command (run as the guest) avoids braces so it nests cleanly.
+    inner = (
+        "$e=@(); $null = Get-CimInstance Win32_Process -ErrorAction "
+        "SilentlyContinue -ErrorVariable e; "
+        "('WMI_DENIED','WMI_OK')[[int]($e.Count -eq 0)] | "
+        "Set-Content -Path C:\\Users\\Public\\wiz_wmi_verify.txt -Force"
+    )
+    ps_script = f"""
+$account = '{WINDOWS_GUEST_USER}'
+$pw = '{pw_lit}'
+$verifyOut = 'C:\\Users\\Public\\wiz_wmi_verify.txt'
+Remove-Item $verifyOut -ErrorAction SilentlyContinue
+try {{
+  $sec = ConvertTo-SecureString $pw -AsPlainText -Force
+  $cred = New-Object System.Management.Automation.PSCredential($account, $sec)
+  $inner = '{inner}'
+  $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
+  Start-Process powershell -Credential $cred -WindowStyle Hidden -WorkingDirectory 'C:\\' -ArgumentList '-NoProfile','-EncodedCommand',$enc -Wait
+  Start-Sleep -Milliseconds 600
+  if (Test-Path $verifyOut) {{
+    $res = (Get-Content $verifyOut -Raw).Trim()
+    Write-Output "WMI_VERIFY: $res"
+  }} else {{
+    Write-Output "WMI_VERIFY: NO_RESULT (guest logon may have failed)"
+  }}
+}} catch {{
+  Write-Output "WMI_VERIFY: ERROR $($_.Exception.Message)"
+}}
+"""
+    try:
+        with open(script_path, "w") as f:
+            f.write(ps_script)
+        result = run_command(
+            f'powershell -NoProfile -ExecutionPolicy Bypass -File "{script_path}"',
+            description="verify guest WMI access",
+            check=False,
+        )
+        out = (result.stdout or "").strip() if result else ""
+        verdict = ""
+        for line in out.splitlines():
+            if "WMI_VERIFY" in line:
+                verdict = line.strip()
+        if "WMI_OK" in verdict:
+            print("        [OK] Guest CAN query Win32_Process — VS Code should connect.")
+        elif "WMI_DENIED" in verdict:
+            print("        [FAIL] Guest STILL denied Win32_Process — VS Code will fail.")
+            print("               (Report this line so I can apply a deeper fix.)")
+        elif verdict:
+            print(f"        [?] {verdict}")
+        logger.info("WMI verify output: %s", out)
+    except Exception as exc:
+        logger.warning("Could not verify WMI access: %s", exc)
+    finally:
+        try:
+            os.remove(script_path)
+        except OSError:
+            pass
+
 
 def _windows_scan_tool_paths():
     """Scan the system for installed developer tools and return found paths."""
