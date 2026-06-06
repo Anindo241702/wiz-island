@@ -367,14 +367,21 @@ foreach ($namespace in @('root/cimv2','root')) {{
     try:
         with open(script_path, "w") as f:
             f.write(ps_script)
-        run_command(
+        print("        Granting guest WMI access (for VS Code Remote-SSH)...")
+        result = run_command(
             f'powershell -NoProfile -ExecutionPolicy Bypass -File "{script_path}"',
             description="grant guest WMI access to root/cimv2",
             check=False,
         )
-        logger.info("Granted WMI namespace access to %s.", WINDOWS_GUEST_USER)
+        out = (result.stdout or "").strip() if result else ""
+        for line in out.splitlines():
+            line = line.strip()
+            if line:
+                print(f"        {line}")
+        logger.info("WMI grant output: %s", out)
     except Exception as exc:
         logger.warning("Could not grant WMI access: %s", exc)
+        print(f"        [WARNING] WMI grant failed: {exc}")
     finally:
         try:
             os.remove(script_path)
@@ -705,6 +712,44 @@ def _windows_ensure_password_auth():
         logger.warning("Could not check/set PasswordAuthentication: %s", exc)
 
 
+def _windows_ensure_concurrency():
+    """Raise sshd concurrency limits so many coders can connect at once.
+
+    Adds/updates MaxStartups and MaxSessions in the GLOBAL section of
+    sshd_config (these directives are not valid inside Match blocks).
+    """
+    try:
+        if not os.path.exists(WINDOWS_SSHD_CONFIG):
+            return
+        with open(WINDOWS_SSHD_CONFIG, "r") as f:
+            content = f.read()
+
+        import re
+        desired = {
+            "MaxStartups": "100:30:200",
+            "MaxSessions": "100",
+        }
+        # Find the first Match block; global directives must go before it.
+        match_pos = re.search(r"^\s*Match\s+", content, re.MULTILINE)
+        head = content[:match_pos.start()] if match_pos else content
+        tail = content[match_pos.start():] if match_pos else ""
+
+        for key, val in desired.items():
+            pattern = re.compile(rf"^\s*#?\s*{key}\s+.*$", re.MULTILINE)
+            if pattern.search(head):
+                head = pattern.sub(f"{key} {val}", head, count=1)
+            else:
+                head = head.rstrip() + f"\n{key} {val}\n"
+
+        new_content = head + ("\n" + tail if tail else "")
+        if new_content != content:
+            with open(WINDOWS_SSHD_CONFIG, "w") as f:
+                f.write(new_content)
+            logger.info("Set sshd concurrency limits (MaxStartups/MaxSessions).")
+    except Exception as exc:
+        logger.warning("Could not set sshd concurrency limits: %s", exc)
+
+
 def windows_configure_ssh_jail():
     """Configure sshd_config to restrict WizGuest to the sandbox drive.
 
@@ -739,6 +784,8 @@ def windows_configure_ssh_jail():
 
         # Enable password auth globally if needed
         _windows_ensure_password_auth()
+        # Raise concurrency limits so multiple coders can connect at once
+        _windows_ensure_concurrency()
         # Re-read after possible modification
         if os.path.exists(WINDOWS_SSHD_CONFIG):
             with open(WINDOWS_SSHD_CONFIG, "r") as f:

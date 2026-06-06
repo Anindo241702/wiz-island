@@ -473,6 +473,9 @@ def run_room_code_mode():
             if configure_vscode_remote_platform("WizIsland", host_platform):
                 print(f"  VS Code platform set to: {host_platform}")
 
+            print("\n  Installing file-transfer commands (Wupload/Wdownload)...")
+            install_client_commands()
+
             print_connection_instructions(
                 host, port, config_path, username=username,
                 reachable=test_connection(host, port), password=password,
@@ -488,6 +491,155 @@ def run_room_code_mode():
     input("\n  Press Enter to return to the menu...")
 
 
+def install_client_commands(alias="WizIsland"):
+    """Install convenience shell commands (Wupload/Wdownload/Wconnect).
+
+    Writes a small helper script to ~/.wiz_island/ and sources it from
+    the user's shell profile so coders get easy file-transfer commands
+    without remembering scp syntax. Idempotent — safe to run repeatedly.
+    """
+    home = os.path.expanduser("~")
+    wiz_dir = os.path.join(home, ".wiz_island")
+    try:
+        os.makedirs(wiz_dir, exist_ok=True)
+    except OSError as exc:
+        logger.warning("Could not create %s: %s", wiz_dir, exc)
+        return False
+
+    is_windows = platform.system() == "Windows"
+
+    if is_windows:
+        cmd_file = os.path.join(wiz_dir, "commands.ps1")
+        content = f"""# Wiz Island client commands (auto-generated)
+function Wconnect {{ ssh {alias} @args }}
+function Wupload {{
+    param([Parameter(Mandatory=$true)][string]$Source, [string]$Dest = ".")
+    scp -r $Source "{alias}:$Dest"
+}}
+function Wdownload {{
+    param([Parameter(Mandatory=$true)][string]$Source, [string]$Dest = ".")
+    scp -r "{alias}:$Source" $Dest
+}}
+function Whelp {{
+    Write-Host "Wiz Island commands:" -ForegroundColor Cyan
+    Write-Host "  Wconnect                    - open an SSH session to the host"
+    Write-Host "  Wupload <local> [remote]    - send a file/folder to the host (default: home)"
+    Write-Host "  Wdownload <remote> [local]  - get a file/folder from the host (default: current dir)"
+    Write-Host "  Whelp                       - show this help"
+}}
+"""
+        try:
+            with open(cmd_file, "w") as f:
+                f.write(content)
+        except IOError as exc:
+            logger.warning("Could not write commands.ps1: %s", exc)
+            return False
+
+        # Resolve the real PowerShell profile path and add a dot-source line
+        source_line = f'. "{cmd_file}"'
+        profile_paths = _get_powershell_profiles()
+        installed = False
+        for profile_path in profile_paths:
+            try:
+                os.makedirs(os.path.dirname(profile_path), exist_ok=True)
+                existing = ""
+                if os.path.exists(profile_path):
+                    with open(profile_path, "r") as f:
+                        existing = f.read()
+                if source_line not in existing:
+                    with open(profile_path, "a") as f:
+                        f.write(f"\n# Wiz Island commands\n{source_line}\n")
+                installed = True
+            except OSError as exc:
+                logger.debug("Could not update profile %s: %s", profile_path, exc)
+        print(f"  Installed commands: Wconnect, Wupload, Wdownload, Whelp")
+        print(f"  (script: {cmd_file})")
+        print("  Open a NEW PowerShell window, then run 'Whelp' to see them.")
+        return installed
+    else:
+        cmd_file = os.path.join(wiz_dir, "commands.sh")
+        content = f"""# Wiz Island client commands (auto-generated)
+Wconnect() {{ ssh {alias} "$@"; }}
+Wupload() {{
+    if [ -z "$1" ]; then echo "Usage: Wupload <local> [remote]"; return 1; fi
+    scp -r "$1" "{alias}:${{2:-.}}"
+}}
+Wdownload() {{
+    if [ -z "$1" ]; then echo "Usage: Wdownload <remote> [local]"; return 1; fi
+    scp -r "{alias}:$1" "${{2:-.}}"
+}}
+Whelp() {{
+    echo "Wiz Island commands:"
+    echo "  Wconnect                    - open an SSH session to the host"
+    echo "  Wupload <local> [remote]    - send a file/folder to the host (default: home)"
+    echo "  Wdownload <remote> [local]  - get a file/folder from the host (default: current dir)"
+    echo "  Whelp                       - show this help"
+}}
+"""
+        try:
+            with open(cmd_file, "w") as f:
+                f.write(content)
+        except IOError as exc:
+            logger.warning("Could not write commands.sh: %s", exc)
+            return False
+
+        source_line = f'[ -f "{cmd_file}" ] && . "{cmd_file}"'
+        installed = False
+        for rc in (".bashrc", ".zshrc", ".profile"):
+            rc_path = os.path.join(home, rc)
+            if rc == ".profile" and (
+                os.path.exists(os.path.join(home, ".bashrc"))
+                or os.path.exists(os.path.join(home, ".zshrc"))
+            ):
+                continue
+            try:
+                existing = ""
+                if os.path.exists(rc_path):
+                    with open(rc_path, "r") as f:
+                        existing = f.read()
+                elif rc != ".profile":
+                    continue
+                if source_line not in existing:
+                    with open(rc_path, "a") as f:
+                        f.write(f"\n# Wiz Island commands\n{source_line}\n")
+                installed = True
+            except OSError as exc:
+                logger.debug("Could not update %s: %s", rc_path, exc)
+        print(f"  Installed commands: Wconnect, Wupload, Wdownload, Whelp")
+        print(f"  (script: {cmd_file})")
+        print("  Open a NEW terminal (or run 'source ~/.bashrc'), then 'Whelp'.")
+        return installed
+
+
+def _get_powershell_profiles():
+    """Return likely PowerShell profile paths for the current user."""
+    profiles = []
+    try:
+        import subprocess
+        for exe in ("powershell", "pwsh"):
+            try:
+                out = subprocess.run(
+                    [exe, "-NoProfile", "-Command", "$PROFILE.CurrentUserAllHosts"],
+                    capture_output=True, text=True, timeout=20,
+                )
+                path = (out.stdout or "").strip()
+                if path:
+                    profiles.append(path)
+            except (FileNotFoundError, subprocess.SubprocessError):
+                continue
+    except Exception as exc:
+        logger.debug("Could not resolve PowerShell profile: %s", exc)
+
+    # Fallback to the standard Documents locations
+    if not profiles:
+        docs = os.path.join(os.path.expanduser("~"), "Documents")
+        profiles = [
+            os.path.join(docs, "WindowsPowerShell", "profile.ps1"),
+            os.path.join(docs, "PowerShell", "profile.ps1"),
+        ]
+    return profiles
+
+
 def run_user_mode():
     """Main entry point for User Mode (client)."""
     print("\n  ============================================================")
@@ -497,11 +649,12 @@ def run_user_mode():
     print("   [1]  Connect via Room Code (auto-reconnect, recommended)")
     print("   [2]  Connect via Tunnel URL (manual, one-time)")
     print("   [3]  Clean/Remove WizIsland SSH Config")
+    print("   [4]  Install file-transfer commands (Wupload/Wdownload)")
     print("   [0]  Back to Main Menu")
     print()
 
     try:
-        choice = input("   Select an option [0-3]: ").strip()
+        choice = input("   Select an option [0-4]: ").strip()
     except (EOFError, KeyboardInterrupt):
         return
 
@@ -510,6 +663,12 @@ def run_user_mode():
 
     if choice == "3":
         remove_ssh_config()
+        input("\n  Press Enter to return to the menu...")
+        return
+
+    if choice == "4":
+        print("\n  Installing Wiz Island file-transfer commands...")
+        install_client_commands()
         input("\n  Press Enter to return to the menu...")
         return
 
@@ -609,6 +768,9 @@ def run_user_mode():
     else:
         print(f"  Could not auto-configure VS Code. Set manually:")
         print(f'    "remote.SSH.remotePlatform": {{"WizIsland": "{host_platform}"}}')
+
+    print("\n  Installing file-transfer commands (Wupload/Wdownload)...")
+    install_client_commands()
 
     print_connection_instructions(
         host, port, config_path, username=username,
