@@ -330,34 +330,53 @@ def _windows_grant_wmi_access():
     script_path = os.path.join(vhdx_dir, "grant_wmi.ps1")
     # Permission mask: Enable(1) | MethodExecute(2) | RemoteEnable(0x20)
     #                  | ReadSecurity(0x20000)
+    # NOTE: we set the trustee via the BINARY SID (the canonical Microsoft
+    # method). Using $trustee.SidString is unreliable and was throwing a
+    # generic "Unexpected error" on hardened machines.
     ps_script = f"""
 $ErrorActionPreference = 'Stop'
 $account = '{WINDOWS_GUEST_USER}'
+
+function Grant-WmiAccess($namespace, $account) {{
+  $WBEM_ENABLE        = 1
+  $WBEM_METHOD_EXECUTE = 2
+  $WBEM_REMOTE_ENABLE = 0x20
+  $READ_CONTROL       = 0x20000
+  $accessMask = $WBEM_ENABLE -bor $WBEM_METHOD_EXECUTE -bor $WBEM_REMOTE_ENABLE -bor $READ_CONTROL
+  $CONTAINER_INHERIT_ACE = 0x2
+  $ACCESS_ALLOWED_ACE    = 0x0
+
+  $ntAccount = New-Object System.Security.Principal.NTAccount($account)
+  $sid = $ntAccount.Translate([System.Security.Principal.SecurityIdentifier])
+  $sidBytes = New-Object byte[] $sid.BinaryLength
+  $sid.GetBinaryForm($sidBytes, 0)
+
+  $sd = Invoke-WmiMethod -Namespace $namespace -Path "__systemsecurity=@" -Name GetSecurityDescriptor
+  if ($sd.ReturnValue -ne 0) {{ throw "GetSecurityDescriptor returned $($sd.ReturnValue)" }}
+  $acl = $sd.Descriptor
+
+  $ace = (New-Object System.Management.ManagementClass("win32_Ace")).CreateInstance()
+  $ace.AccessMask = $accessMask
+  $ace.AceFlags   = $CONTAINER_INHERIT_ACE
+  $ace.AceType    = $ACCESS_ALLOWED_ACE
+
+  $trustee = (New-Object System.Management.ManagementClass("win32_Trustee")).CreateInstance()
+  $trustee.SID = $sidBytes
+  $ace.Trustee = $trustee
+
+  # Append the new ACE (handle a null/empty existing DACL safely)
+  $dacl = @()
+  if ($acl.DACL) {{ $dacl = @($acl.DACL) }}
+  $dacl += $ace.psobject.immediateBaseObject
+  $acl.DACL = $dacl
+
+  $set = Invoke-WmiMethod -Namespace $namespace -Path "__systemsecurity=@" -Name SetSecurityDescriptor -ArgumentList $acl
+  if ($set.ReturnValue -ne 0) {{ throw "SetSecurityDescriptor returned $($set.ReturnValue)" }}
+}}
+
 foreach ($namespace in @('root/cimv2','root')) {{
   try {{
-    $accessMask = 1 -bor 2 -bor 0x20 -bor 0x20000
-    $ntAccount = New-Object System.Security.Principal.NTAccount($account)
-    $sid = $ntAccount.Translate([System.Security.Principal.SecurityIdentifier]).Value
-
-    $sd = Invoke-WmiMethod -Namespace $namespace -Path "__systemsecurity=@" -Name GetSecurityDescriptor
-    if ($sd.ReturnValue -ne 0) {{ throw "GetSecurityDescriptor failed ($($sd.ReturnValue))" }}
-    $acl = $sd.Descriptor
-
-    $CONTAINER_INHERIT_ACE_FLAG = 0x2
-    $ACCESS_ALLOWED_ACE_TYPE = 0x0
-
-    $ace = (New-Object System.Management.ManagementClass("win32_Ace")).CreateInstance()
-    $ace.AccessMask = $accessMask
-    $ace.AceFlags = $CONTAINER_INHERIT_ACE_FLAG
-    $trustee = (New-Object System.Management.ManagementClass("win32_Trustee")).CreateInstance()
-    $trustee.SidString = $sid
-    $ace.Trustee = $trustee
-    $ace.AceType = $ACCESS_ALLOWED_ACE_TYPE
-
-    $acl.DACL += $ace.psobject.immediateBaseObject
-
-    $set = Invoke-WmiMethod -Namespace $namespace -Path "__systemsecurity=@" -Name SetSecurityDescriptor -ArgumentList $acl
-    if ($set.ReturnValue -ne 0) {{ throw "SetSecurityDescriptor failed ($($set.ReturnValue))" }}
+    Grant-WmiAccess $namespace $account
     Write-Output "WMI access granted on $namespace for $account"
   }} catch {{
     Write-Output "WMI grant skipped on $namespace : $($_.Exception.Message)"
@@ -367,14 +386,17 @@ foreach ($namespace in @('root/cimv2','root')) {{
     try:
         with open(script_path, "w") as f:
             f.write(ps_script)
-        # WMI access is only needed for the optional VS Code Remote-SSH path,
-        # so keep this quiet — details go to the log, not the console.
+        print("        Granting guest WMI access (enables VS Code Remote-SSH)...")
         result = run_command(
             f'powershell -NoProfile -ExecutionPolicy Bypass -File "{script_path}"',
             description="grant guest WMI access to root/cimv2",
             check=False,
         )
         out = (result.stdout or "").strip() if result else ""
+        for line in out.splitlines():
+            line = line.strip()
+            if line:
+                print(f"        {line}")
         logger.info("WMI grant output: %s", out)
     except Exception as exc:
         logger.warning("Could not grant WMI access: %s", exc)
@@ -447,7 +469,13 @@ try {{
         for line in out.splitlines():
             if "WMI_VERIFY" in line:
                 verdict = line.strip()
-        # Log-only: VS Code is optional. Surfaced here for debugging if needed.
+        if "WMI_OK" in verdict:
+            print("        [OK] Guest CAN query Win32_Process — VS Code should connect.")
+        elif "WMI_DENIED" in verdict:
+            print("        [FAIL] Guest STILL denied Win32_Process — VS Code will fail.")
+            print("               (Paste this line; I'll provide a manual admin fix.)")
+        elif verdict:
+            print(f"        [?] {verdict}")
         logger.info("WMI verify result: %s", verdict or out)
     except Exception as exc:
         logger.warning("Could not verify WMI access: %s", exc)
@@ -1138,6 +1166,19 @@ if ($env:USERNAME -eq '{WINDOWS_GUEST_USER}') {{
         }}
         if ($env:VIRTUAL_ENV) {{ Write-Host "  venv     $env:VIRTUAL_ENV" }}
         if ($env:CONDA_DEFAULT_ENV) {{ Write-Host "  conda    $env:CONDA_DEFAULT_ENV" }}
+    }}
+
+    # Whelp (host side): explain that file-transfer commands run on the CLIENT
+    function global:Whelp {{
+        Write-Host "You are INSIDE the Wiz Island sandbox (drive X:)." -ForegroundColor Cyan
+        Write-Host "Your files live here and persist across sessions."
+        Write-Host ""
+        Write-Host "Run Wenv to see installed tools (python/git/node)." 
+        Write-Host ""
+        Write-Host "File transfer is done from YOUR OWN pc (not here):" -ForegroundColor Cyan
+        Write-Host "  Wupload <local>   - send a file/folder from your pc into X:"
+        Write-Host "  Wdownload <path>  - pull a file/folder from X: to your pc"
+        Write-Host "  (Open a normal terminal on your computer and run those.)"
     }}
 
     # Set working directory to sandbox
