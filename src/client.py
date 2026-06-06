@@ -543,11 +543,17 @@ def _install_windows_cmd_shims(wiz_dir, alias):
         ),
         "Whelp.cmd": (
             "@echo off\r\n"
-            "echo Wiz Island commands:\r\n"
+            "echo Wiz Island commands (run these on YOUR pc, not after SSH-ing in):\r\n"
             "echo   Wconnect                    - open an SSH session to the host\r\n"
             "echo   Wupload ^<local^> [remote]    - send a file/folder to the host\r\n"
             "echo   Wdownload ^<remote^> [local]  - get a file/folder from the host\r\n"
             "echo   Whelp                       - show this help\r\n"
+            "echo.\r\n"
+            "echo Examples:\r\n"
+            "echo   Wupload main.py              (-^> lands in your sandbox home on X:)\r\n"
+            "echo   Wupload .\\myproject code      (-^> uploads folder into X:\\code)\r\n"
+            "echo   Wdownload results.csv         (-^> saves to your current folder)\r\n"
+            "echo   Wconnect                      (-^> opens a shell on the host)\r\n"
         ),
     }
     for name, body in shims.items():
@@ -606,11 +612,17 @@ function Wdownload {{
     scp -r "{alias}:$Source" $Dest
 }}
 function Whelp {{
-    Write-Host "Wiz Island commands:" -ForegroundColor Cyan
+    Write-Host "Wiz Island commands (run on YOUR pc, not after SSH-ing in):" -ForegroundColor Cyan
     Write-Host "  Wconnect                    - open an SSH session to the host"
     Write-Host "  Wupload <local> [remote]    - send a file/folder to the host (default: home)"
     Write-Host "  Wdownload <remote> [local]  - get a file/folder from the host (default: current dir)"
     Write-Host "  Whelp                       - show this help"
+    Write-Host ""
+    Write-Host "Examples:" -ForegroundColor Cyan
+    Write-Host "  Wupload main.py             # lands in your sandbox home on X:"
+    Write-Host "  Wupload .\myproject code    # uploads folder into X:\code"
+    Write-Host "  Wdownload results.csv       # saves to your current folder"
+    Write-Host "  Wconnect                    # opens a shell on the host"
 }}
 """
         try:
@@ -663,11 +675,17 @@ Wdownload() {{
     scp -r "{alias}:$1" "${{2:-.}}"
 }}
 Whelp() {{
-    echo "Wiz Island commands:"
+    echo "Wiz Island commands (run on YOUR pc, not after SSH-ing in):"
     echo "  Wconnect                    - open an SSH session to the host"
     echo "  Wupload <local> [remote]    - send a file/folder to the host (default: home)"
     echo "  Wdownload <remote> [local]  - get a file/folder from the host (default: current dir)"
     echo "  Whelp                       - show this help"
+    echo ""
+    echo "Examples:"
+    echo "  Wupload main.py             # lands in your sandbox home on X:"
+    echo "  Wupload ./myproject code    # uploads folder into X:/code"
+    echo "  Wdownload results.csv       # saves to your current folder"
+    echo "  Wconnect                    # opens a shell on the host"
 }}
 """
         try:

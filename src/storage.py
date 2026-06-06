@@ -1088,12 +1088,26 @@ if ($env:USERNAME -eq '{WINDOWS_GUEST_USER}') {{
         if (Test-Path $cudaPath -EA 0) {{ $toolDirs += $cudaPath }}
     }}
 
+    # Sandbox-local tools (X:\\tools) — appended LAST so they take TOP
+    # priority on PATH and keep working after the C: lockdown.
+    $toolDirs += @(
+        '{sandbox_dir}tools\\python',
+        '{sandbox_dir}tools\\python\\Scripts',
+        '{sandbox_dir}tools\\git\\cmd',
+        '{sandbox_dir}tools\\git\\usr\\bin',
+        '{sandbox_dir}tools\\node'
+    )
+
     # Add discovered paths
     foreach ($d in $toolDirs) {{
         if ((Test-Path $d -EA 0) -and ($env:Path -notlike "*$d*")) {{
             $env:Path = "$d;" + $env:Path
         }}
     }}
+
+    # Make the sandbox home the working directory + HOME for tools/git
+    $env:HOME = '{sandbox_dir}home'
+    if (Test-Path '{sandbox_dir}home' -EA 0) {{ Set-Location '{sandbox_dir}home' }}
 
     # Cache a short Python version string for the prompt
     $script:WizPy = ''
@@ -1161,27 +1175,205 @@ if ($env:USERNAME -eq '{WINDOWS_GUEST_USER}') {{
         logger.warning("Could not configure PowerShell profile: %s", exc)
 
 
+def _windows_get_user_sid(user):
+    """Return the SID string for a local user, or '' if not resolvable."""
+    try:
+        result = run_command(
+            'powershell -NoProfile -Command '
+            f'"(New-Object System.Security.Principal.NTAccount(\'{user}\'))'
+            '.Translate([System.Security.Principal.SecurityIdentifier]).Value"',
+            description="resolve guest SID",
+            check=False,
+        )
+        sid = (result.stdout or "").strip() if result else ""
+        return sid if sid.startswith("S-") else ""
+    except Exception as exc:
+        logger.warning("Could not resolve SID for %s: %s", user, exc)
+        return ""
+
+
+def windows_set_guest_home():
+    """Point the guest's Windows profile/home at the sandbox drive (X:).
+
+    Sets ProfileImagePath for the guest SID so USERPROFILE resolves to a
+    folder on X:. This makes VS Code Remote-SSH open X: (its server and all
+    files install there) and ensures everything PERSISTS on the VHDX instead
+    of the host's C: drive (which gets wiped when the guest account is reset).
+    """
+    home_path = WINDOWS_MOUNT_DRIVE + "\\home"
+    try:
+        run_command(
+            f'cmd /c if not exist "{home_path}" mkdir "{home_path}"',
+            description="create guest home on sandbox",
+            check=False,
+        )
+        # Grant the guest full control of its home
+        run_command(
+            f'icacls "{home_path}" /grant {WINDOWS_GUEST_USER}:(OI)(CI)F /T /C /Q',
+            description="grant guest home permissions",
+            check=False,
+        )
+        sid = _windows_get_user_sid(WINDOWS_GUEST_USER)
+        if sid:
+            key = (
+                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+                rf"\ProfileList\{sid}"
+            )
+            run_command(
+                f'reg add "{key}" /v ProfileImagePath /t REG_EXPAND_SZ '
+                f'/d "{home_path}" /f',
+                description="set guest ProfileImagePath to sandbox",
+                check=False,
+            )
+            logger.info("Set guest home (ProfileImagePath) to %s", home_path)
+            print(f"        Guest home set to {home_path} (persists on sandbox)")
+        else:
+            logger.warning("Could not resolve guest SID; home not redirected.")
+        run_command(
+            f'net user {WINDOWS_GUEST_USER} /homedir:{home_path}',
+            description="set guest net-user homedir",
+            check=False,
+        )
+    except Exception as exc:
+        logger.warning("Could not set guest home: %s", exc)
+
+
+def windows_install_tools_into_sandbox():
+    """Download portable Python, Git, and Node INTO the sandbox (X:\\tools).
+
+    Installing tools inside the sandbox means they survive the C: lockdown
+    (strong isolation) and persist on the VHDX. Idempotent: skips a tool if
+    it's already present. Falls back gracefully (host tools remain on PATH
+    until lockdown) if a download fails.
+    """
+    tools_root = WINDOWS_MOUNT_DRIVE + "\\tools"
+    py_url = "https://www.python.org/ftp/python/3.12.7/python-3.12.7-amd64.exe"
+    git_url = ("https://github.com/git-for-windows/git/releases/download/"
+               "v2.47.0.windows.1/MinGit-2.47.0-64-bit.zip")
+    node_url = "https://nodejs.org/dist/v20.18.0/node-v20.18.0-win-x64.zip"
+    node_inner = "node-v20.18.0-win-x64"
+
+    ps_script = f"""
+$ErrorActionPreference = 'Stop'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$tools = '{tools_root}'
+$dl = Join-Path $tools 'dl'
+New-Item -ItemType Directory -Force -Path $dl | Out-Null
+
+# ---- Python ----
+try {{
+  if (Test-Path (Join-Path $tools 'python\\python.exe')) {{
+    Write-Output 'TOOL python: already installed'
+  }} else {{
+    Write-Output 'TOOL python: downloading...'
+    $pyExe = Join-Path $dl 'python-setup.exe'
+    Invoke-WebRequest -Uri '{py_url}' -OutFile $pyExe
+    Write-Output 'TOOL python: installing...'
+    Start-Process -Wait -FilePath $pyExe -ArgumentList '/quiet','InstallAllUsers=0',('TargetDir=' + (Join-Path $tools 'python')),'PrependPath=0','Include_pip=1','Include_test=0','AssociateFiles=0','Shortcuts=0','Include_launcher=0'
+    if (Test-Path (Join-Path $tools 'python\\python.exe')) {{ Write-Output 'TOOL python: OK' }} else {{ Write-Output 'TOOL python: FAILED (no exe)' }}
+  }}
+}} catch {{ Write-Output ('TOOL python: ERROR ' + $_.Exception.Message) }}
+
+# ---- Git (MinGit) ----
+try {{
+  if (Test-Path (Join-Path $tools 'git\\cmd\\git.exe')) {{
+    Write-Output 'TOOL git: already installed'
+  }} else {{
+    Write-Output 'TOOL git: downloading...'
+    $gitZip = Join-Path $dl 'mingit.zip'
+    Invoke-WebRequest -Uri '{git_url}' -OutFile $gitZip
+    Write-Output 'TOOL git: extracting...'
+    $gitDir = Join-Path $tools 'git'
+    if (Test-Path $gitDir) {{ Remove-Item $gitDir -Recurse -Force }}
+    Expand-Archive -Path $gitZip -DestinationPath $gitDir -Force
+    if (Test-Path (Join-Path $tools 'git\\cmd\\git.exe')) {{ Write-Output 'TOOL git: OK' }} else {{ Write-Output 'TOOL git: FAILED (no exe)' }}
+  }}
+}} catch {{ Write-Output ('TOOL git: ERROR ' + $_.Exception.Message) }}
+
+# ---- Node ----
+try {{
+  if (Test-Path (Join-Path $tools 'node\\node.exe')) {{
+    Write-Output 'TOOL node: already installed'
+  }} else {{
+    Write-Output 'TOOL node: downloading...'
+    $nodeZip = Join-Path $dl 'node.zip'
+    Invoke-WebRequest -Uri '{node_url}' -OutFile $nodeZip
+    Write-Output 'TOOL node: extracting...'
+    Expand-Archive -Path $nodeZip -DestinationPath $tools -Force
+    $inner = Join-Path $tools '{node_inner}'
+    $nodeDir = Join-Path $tools 'node'
+    if (Test-Path $nodeDir) {{ Remove-Item $nodeDir -Recurse -Force }}
+    if (Test-Path $inner) {{ Rename-Item $inner 'node' }}
+    if (Test-Path (Join-Path $tools 'node\\node.exe')) {{ Write-Output 'TOOL node: OK' }} else {{ Write-Output 'TOOL node: FAILED (no exe)' }}
+  }}
+}} catch {{ Write-Output ('TOOL node: ERROR ' + $_.Exception.Message) }}
+
+# Grant guest access to the tools tree
+try {{
+  icacls $tools /grant '{WINDOWS_GUEST_USER}:(OI)(CI)RX' /T /C /Q | Out-Null
+  Write-Output 'TOOL perms: OK'
+}} catch {{ Write-Output ('TOOL perms: ERROR ' + $_.Exception.Message) }}
+"""
+    vhdx_dir = os.path.dirname(WINDOWS_VHDX_PATH)
+    try:
+        os.makedirs(vhdx_dir, exist_ok=True)
+    except OSError:
+        vhdx_dir = os.environ.get("TEMP", r"C:\Windows\Temp")
+    script_path = os.path.join(vhdx_dir, "install_tools.ps1")
+    try:
+        with open(script_path, "w") as f:
+            f.write(ps_script)
+        print("        Downloading & installing Python/Git/Node into the "
+              "sandbox (first run may take a few minutes)...")
+        result = run_command(
+            f'powershell -NoProfile -ExecutionPolicy Bypass -File "{script_path}"',
+            description="install tools into sandbox",
+            check=False,
+        )
+        out = (result.stdout or "").strip() if result else ""
+        for line in out.splitlines():
+            line = line.strip()
+            if line.startswith("TOOL "):
+                print(f"        {line}")
+        logger.info("Tool install output: %s", out)
+    except Exception as exc:
+        logger.warning("Could not install sandbox tools: %s", exc)
+        print(f"        [WARNING] Sandbox tool install failed: {exc}")
+        print("        (Guest will fall back to host tools until resolved.)")
+    finally:
+        try:
+            os.remove(script_path)
+        except OSError:
+            pass
+
+
 def windows_setup_storage(size_gb):
     """Full Windows storage setup pipeline."""
-    print(f"  [1/7] Creating {size_gb} GB VHDX virtual disk...")
+    print(f"  [1/9] Creating {size_gb} GB VHDX virtual disk...")
     windows_create_vhdx(size_gb)
 
-    print(f"  [2/7] Creating guest user '{WINDOWS_GUEST_USER}'...")
+    print(f"  [2/9] Creating guest user '{WINDOWS_GUEST_USER}'...")
     windows_create_guest_user()
 
-    print(f"  [3/7] Setting permissions on {WINDOWS_MOUNT_DRIVE}...")
+    print(f"  [3/9] Setting permissions on {WINDOWS_MOUNT_DRIVE}...")
     windows_set_permissions()
 
-    print("  [4/7] Configuring SSH jail...")
+    print("  [4/9] Redirecting guest home to sandbox (persistence)...")
+    windows_set_guest_home()
+
+    print("  [5/9] Installing developer tools into sandbox (X:\\tools)...")
+    windows_install_tools_into_sandbox()
+
+    print("  [6/9] Configuring SSH jail...")
     windows_configure_ssh_jail()
 
-    print("  [5/7] Configuring shell & developer tools...")
+    print("  [7/9] Configuring shell & developer tools...")
     _windows_set_default_shell()
 
-    print("  [6/7] Granting guest access to host tools...")
+    print("  [8/9] Granting guest access to host tools...")
     _windows_grant_tool_access()
 
-    print("  [7/7] Configuring firewall...")
+    print("  [9/9] Configuring firewall...")
     windows_configure_firewall()
 
     print("  Storage setup complete.")
