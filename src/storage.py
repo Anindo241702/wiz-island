@@ -367,21 +367,17 @@ foreach ($namespace in @('root/cimv2','root')) {{
     try:
         with open(script_path, "w") as f:
             f.write(ps_script)
-        print("        Granting guest WMI access (for VS Code Remote-SSH)...")
+        # WMI access is only needed for the optional VS Code Remote-SSH path,
+        # so keep this quiet — details go to the log, not the console.
         result = run_command(
             f'powershell -NoProfile -ExecutionPolicy Bypass -File "{script_path}"',
             description="grant guest WMI access to root/cimv2",
             check=False,
         )
         out = (result.stdout or "").strip() if result else ""
-        for line in out.splitlines():
-            line = line.strip()
-            if line:
-                print(f"        {line}")
         logger.info("WMI grant output: %s", out)
     except Exception as exc:
         logger.warning("Could not grant WMI access: %s", exc)
-        print(f"        [WARNING] WMI grant failed: {exc}")
     finally:
         try:
             os.remove(script_path)
@@ -451,14 +447,8 @@ try {{
         for line in out.splitlines():
             if "WMI_VERIFY" in line:
                 verdict = line.strip()
-        if "WMI_OK" in verdict:
-            print("        [OK] Guest CAN query Win32_Process — VS Code should connect.")
-        elif "WMI_DENIED" in verdict:
-            print("        [FAIL] Guest STILL denied Win32_Process — VS Code will fail.")
-            print("               (Report this line so I can apply a deeper fix.)")
-        elif verdict:
-            print(f"        [?] {verdict}")
-        logger.info("WMI verify output: %s", out)
+        # Log-only: VS Code is optional. Surfaced here for debugging if needed.
+        logger.info("WMI verify result: %s", verdict or out)
     except Exception as exc:
         logger.warning("Could not verify WMI access: %s", exc)
     finally:
@@ -959,6 +949,41 @@ def windows_configure_firewall():
         logger.warning("Could not add firewall rule (SSH may still work): %s", exc)
 
 
+def _windows_set_execution_policy():
+    """Set the machine PowerShell execution policy to RemoteSigned.
+
+    A 'Restricted' policy blocks ALL .ps1 scripts — including the guest
+    profile and the client's helper commands — which silently breaks PATH
+    setup and the Wupload/Wdownload commands. RemoteSigned is the standard,
+    safe setting: locally-created scripts run; downloaded ones need signing.
+    """
+    try:
+        run_command(
+            'powershell -NoProfile -Command '
+            '"Set-ExecutionPolicy -Scope LocalMachine '
+            '-ExecutionPolicy RemoteSigned -Force"',
+            description="set execution policy RemoteSigned (LocalMachine)",
+            check=False,
+        )
+        result = run_command(
+            'powershell -NoProfile -Command '
+            '"Get-ExecutionPolicy -Scope LocalMachine"',
+            description="check execution policy",
+            check=False,
+        )
+        pol = (result.stdout or "").strip() if result else ""
+        logger.info("LocalMachine execution policy is now: %s", pol)
+        if pol:
+            print(f"        Execution policy (LocalMachine): {pol}")
+        if pol and pol.lower() == "restricted":
+            print("        [WARNING] Execution policy is still Restricted "
+                  "(may be enforced by Group Policy).")
+            print("        Scripts/profile may not load; commands still work "
+                  "via .cmd fallback.")
+    except Exception as exc:
+        logger.warning("Could not set execution policy: %s", exc)
+
+
 def _windows_set_default_shell():
     """Set the default SSH shell to PowerShell and configure guest profile.
 
@@ -971,6 +996,10 @@ def _windows_set_default_shell():
     if not os.path.exists(ps_path):
         logger.info("PowerShell not found at default path, skipping shell config.")
         return
+
+    # Allow local scripts to run (the guest profile is a .ps1). Without this,
+    # a 'Restricted' policy blocks the profile entirely.
+    _windows_set_execution_policy()
 
     reg_key = r"HKLM\SOFTWARE\OpenSSH"
     try:
@@ -1064,6 +1093,37 @@ if ($env:USERNAME -eq '{WINDOWS_GUEST_USER}') {{
         if ((Test-Path $d -EA 0) -and ($env:Path -notlike "*$d*")) {{
             $env:Path = "$d;" + $env:Path
         }}
+    }}
+
+    # Cache a short Python version string for the prompt
+    $script:WizPy = ''
+    try {{
+        $pv = (& python --version) 2>&1
+        if ("$pv" -match '(\\d+\\.\\d+(\\.\\d+)?)') {{ $script:WizPy = 'py' + $Matches[1] }}
+    }} catch {{ }}
+
+    # Prompt shows the sandbox tag + active Python/venv/conda environment
+    function global:prompt {{
+        $envName = ''
+        if ($env:VIRTUAL_ENV) {{ $envName = Split-Path $env:VIRTUAL_ENV -Leaf }}
+        elseif ($env:CONDA_DEFAULT_ENV) {{ $envName = $env:CONDA_DEFAULT_ENV }}
+        elseif ($script:WizPy) {{ $envName = $script:WizPy }}
+        if ($envName) {{ $tag = "WizIsland ($envName)" }} else {{ $tag = "WizIsland" }}
+        "$tag $(Get-Location)> "
+    }}
+
+    # Wenv: show what languages/tools and environment are available
+    function global:Wenv {{
+        Write-Host "Wiz Island sandbox environment:" -ForegroundColor Cyan
+        foreach ($t in @('python','pip','node','npm','git','go','java','cargo')) {{
+            $c = Get-Command $t -EA 0
+            if ($c) {{
+                $v = (& $t --version 2>&1 | Select-Object -First 1)
+                Write-Host ("  {{0,-8}} {{1}}" -f $t, $v)
+            }}
+        }}
+        if ($env:VIRTUAL_ENV) {{ Write-Host "  venv     $env:VIRTUAL_ENV" }}
+        if ($env:CONDA_DEFAULT_ENV) {{ Write-Host "  conda    $env:CONDA_DEFAULT_ENV" }}
     }}
 
     # Set working directory to sandbox

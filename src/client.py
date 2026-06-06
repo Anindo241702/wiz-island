@@ -12,6 +12,7 @@ import os
 import platform
 import re
 import socket
+import subprocess
 import time
 import urllib.request
 import urllib.error
@@ -491,6 +492,90 @@ def run_room_code_mode():
     input("\n  Press Enter to return to the menu...")
 
 
+def _set_client_execution_policy():
+    """Set the current user's PowerShell execution policy to RemoteSigned.
+
+    Does not require admin (CurrentUser scope). Lets the client's profile
+    and commands.ps1 load on machines where the default policy is
+    'Restricted'. Best-effort: ignored on failure (the .cmd shims still
+    work regardless).
+    """
+    try:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Set-ExecutionPolicy -Scope CurrentUser "
+             "-ExecutionPolicy RemoteSigned -Force"],
+            capture_output=True, text=True, timeout=30,
+        )
+        logger.info("Set CurrentUser execution policy to RemoteSigned.")
+    except Exception as exc:
+        logger.debug("Could not set client execution policy: %s", exc)
+
+
+def _install_windows_cmd_shims(wiz_dir, alias):
+    """Create .cmd wrappers on PATH so commands work in ANY shell.
+
+    .cmd files are not subject to PowerShell's execution policy, so these
+    work in both cmd.exe and PowerShell even if scripts are blocked.
+    """
+    bin_dir = os.path.join(wiz_dir, "bin")
+    try:
+        os.makedirs(bin_dir, exist_ok=True)
+    except OSError as exc:
+        logger.debug("Could not create bin dir: %s", exc)
+        return
+
+    shims = {
+        "Wconnect.cmd": f"@echo off\r\nssh {alias} %*\r\n",
+        "Wupload.cmd": (
+            "@echo off\r\n"
+            "if \"%~1\"==\"\" (echo Usage: Wupload ^<local^> [remote] & exit /b 1)\r\n"
+            "set \"DEST=%~2\"\r\n"
+            "if \"%DEST%\"==\"\" set \"DEST=.\"\r\n"
+            f"scp -r \"%~1\" \"{alias}:%DEST%\"\r\n"
+        ),
+        "Wdownload.cmd": (
+            "@echo off\r\n"
+            "if \"%~1\"==\"\" (echo Usage: Wdownload ^<remote^> [local] & exit /b 1)\r\n"
+            "set \"DEST=%~2\"\r\n"
+            "if \"%DEST%\"==\"\" set \"DEST=.\"\r\n"
+            f"scp -r \"{alias}:%~1\" \"%DEST%\"\r\n"
+        ),
+        "Whelp.cmd": (
+            "@echo off\r\n"
+            "echo Wiz Island commands:\r\n"
+            "echo   Wconnect                    - open an SSH session to the host\r\n"
+            "echo   Wupload ^<local^> [remote]    - send a file/folder to the host\r\n"
+            "echo   Wdownload ^<remote^> [local]  - get a file/folder from the host\r\n"
+            "echo   Whelp                       - show this help\r\n"
+        ),
+    }
+    for name, body in shims.items():
+        try:
+            with open(os.path.join(bin_dir, name), "w", newline="") as f:
+                f.write(body)
+        except OSError as exc:
+            logger.debug("Could not write shim %s: %s", name, exc)
+
+    # Add bin_dir to the USER PATH (registry) if not already present.
+    try:
+        ps = (
+            "$d='" + bin_dir.replace("'", "''") + "'; "
+            "$p=[Environment]::GetEnvironmentVariable('PATH','User'); "
+            "if (-not $p) { $p='' }; "
+            "if (($p -split ';') -notcontains $d) { "
+            "[Environment]::SetEnvironmentVariable('PATH', "
+            "($p.TrimEnd(';') + ';' + $d), 'User') }"
+        )
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            capture_output=True, text=True, timeout=30,
+        )
+        logger.info("Added %s to user PATH.", bin_dir)
+    except Exception as exc:
+        logger.debug("Could not update user PATH: %s", exc)
+
+
 def install_client_commands(alias="WizIsland"):
     """Install convenience shell commands (Wupload/Wdownload/Wconnect).
 
@@ -535,6 +620,10 @@ function Whelp {{
             logger.warning("Could not write commands.ps1: %s", exc)
             return False
 
+        # Allow locally-created scripts to run (default policy may be
+        # 'Restricted', which blocks the profile and commands.ps1).
+        _set_client_execution_policy()
+
         # Resolve the real PowerShell profile path and add a dot-source line
         source_line = f'. "{cmd_file}"'
         profile_paths = _get_powershell_profiles()
@@ -552,9 +641,14 @@ function Whelp {{
                 installed = True
             except OSError as exc:
                 logger.debug("Could not update profile %s: %s", profile_path, exc)
+
+        # Bulletproof fallback: .cmd wrappers on PATH work in ANY shell
+        # (cmd or PowerShell) regardless of execution policy / GPO.
+        _install_windows_cmd_shims(wiz_dir, alias)
+
         print(f"  Installed commands: Wconnect, Wupload, Wdownload, Whelp")
         print(f"  (script: {cmd_file})")
-        print("  Open a NEW PowerShell window, then run 'Whelp' to see them.")
+        print("  Open a NEW terminal (PowerShell or cmd), then run 'Whelp'.")
         return installed
     else:
         cmd_file = os.path.join(wiz_dir, "commands.sh")
