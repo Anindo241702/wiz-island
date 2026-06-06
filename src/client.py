@@ -620,7 +620,7 @@ function Whelp {{
     Write-Host ""
     Write-Host "Examples:" -ForegroundColor Cyan
     Write-Host "  Wupload main.py             # lands in your sandbox home on X:"
-    Write-Host "  Wupload .\myproject code    # uploads folder into X:\code"
+    Write-Host "  Wupload .\\myproject code    # uploads folder into X:\\code"
     Write-Host "  Wdownload results.csv       # saves to your current folder"
     Write-Host "  Wconnect                    # opens a shell on the host"
 }}
